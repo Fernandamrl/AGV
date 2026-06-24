@@ -115,6 +115,9 @@ def fetch(data_inicio: str, data_fim: str) -> pd.DataFrame:
     for col in ['CidadeDestino','CEP','LojaNome','LojaGrupo','Polo','DataConclusao','DataSLA_Sistema']:
         if col not in df.columns: df[col] = ''
 
+    # Normaliza nome da cidade (elimina duplicatas por capitalização: MONGAGUA vs Mongagua)
+    df['CidadeDestino'] = df['CidadeDestino'].str.strip().str.title()
+
     # Calcula SLA
     def calc(row):
         s = str(row.get('Servico','') or '').upper()
@@ -183,7 +186,8 @@ def kpis(df: pd.DataFrame) -> dict:
         for polo, g in sem1h[sem1h['Polo'].str.strip().ne('')].groupby('Polo'):
             ge = g[g['Status_SLA']!='Pendente']
             ne = len(ge); oe = (ge['Status_SLA']=='No Prazo').sum()
-            polos[polo] = {'total':len(g),'entregues':ne,'ok':oe,'sla':oe/ne*100 if ne else 0}
+            if ne == 0: continue  # polo sem entregas no período — oculta do report
+            polos[polo] = {'total':len(g),'entregues':ne,'ok':oe,'sla':oe/ne*100}
 
     # Cidades críticas (atrasadas)
     cidades_crit = {}
