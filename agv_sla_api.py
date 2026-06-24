@@ -115,7 +115,7 @@ def fetch(data_inicio: str, data_fim: str) -> pd.DataFrame:
     for col in ['CidadeDestino','CEP','LojaNome','LojaGrupo','Polo','DataConclusao','DataSLA_Sistema']:
         if col not in df.columns: df[col] = ''
 
-    # Normaliza nome da cidade (elimina duplicatas por capitalização)
+    # Normaliza capitalização das cidades
     df['CidadeDestino'] = df['CidadeDestino'].str.strip().str.title()
 
     # Calcula SLA
@@ -207,90 +207,99 @@ def kpis(df: pd.DataFrame) -> dict:
 
 
 STATUS_MAP = {
-    'Entrega Realizada':                 'Entregue',
-    'Acareação: Entrega Realizada':      'Entregue',
-    'Chegada no Destinatário':           'Entregue',
-    'Coletado na Loja':                  'Entregue',
-    'Despachado':                        'Em Trânsito',
-    'Chegada na Base':                   'Em Trânsito',
-    'Transferência entre unidades':      'Em Trânsito',
-    'Rota de Entrega':                   'Em Trânsito',
-    'Integração Recebida':               'Expedindo',
-    'Não Coletado':                      'Expedindo',
-    'Coleta Cancelado pelo Remetente':   'Cancelado',
-    'Entrega Cancelada pelo Remetente':  'Cancelado',
-    'Cancelado pelo Destinatário':       'Cancelado',
-    'Cliente Ausente':                   'Insucesso',
-    'Localidade Não Atendida':           'Insucesso',
-    'Endereço Não Localizado':           'Insucesso',
-    'Número não Localizado':             'Insucesso',
-    'Estabelecimento Fechado':           'Insucesso',
-    'Destinatário Não Encontrado':       'Insucesso',
-    'Recusado por Terceiro':             'Insucesso',
-    'Outras Ocorrências':                'Insucesso',
-    'Em Devolução':                      'Devolução',
-    'Devolvido':                         'Devolução',
-    'Pedido Extraviado':                 'Problema',
-    'Pedido Danificado':                 'Problema',
-    'Aguardando Tratativa':              'Problema',
+    'Entrega Realizada':                'Entregue',
+    'Acareação: Entrega Realizada':     'Entregue',
+    'Chegada no Destinatário':          'Entregue',
+    'Coletado na Loja':                 'Entregue',
+    'Despachado':                       'Em Trânsito',
+    'Chegada na Base':                  'Em Trânsito',
+    'Transferência entre unidades':     'Em Trânsito',
+    'Rota de Entrega':                  'Em Trânsito',
+    'Integração Recebida':              'Expedindo',
+    'Não Coletado':                     'Expedindo',
+    'Coleta Cancelado pelo Remetente':  'Cancelado',
+    'Entrega Cancelada pelo Remetente': 'Cancelado',
+    'Cancelado pelo Destinatário':      'Cancelado',
+    'Cliente Ausente':                  'Insucesso',
+    'Localidade Não Atendida':          'Insucesso',
+    'Endereço Não Localizado':          'Insucesso',
+    'Número não Localizado':            'Insucesso',
+    'Estabelecimento Fechado':          'Insucesso',
+    'Destinatário Não Encontrado':      'Insucesso',
+    'Recusado por Terceiro':            'Insucesso',
+    'Outras Ocorrências':               'Insucesso',
+    'Em Devolução':                     'Devolução',
+    'Devolvido':                        'Devolução',
+    'Pedido Extraviado':                'Problema',
+    'Pedido Danificado':                'Problema',
+    'Aguardando Tratativa':             'Problema',
 }
+
+STATUS_ABERTOS = {'Em Trânsito', 'Expedindo', 'Insucesso', 'Outros'}
 
 
 def status_operacional(df: pd.DataFrame) -> dict:
-    """Retorna contagens por status e lojas com insucesso crítico."""
     sem1h = df[~df['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
     sem1h['StatusOp'] = sem1h['Status'].map(STATUS_MAP).fillna('Outros')
-    total = len(sem1h)
-
-    contagens = sem1h['StatusOp'].value_counts().to_dict()
-
-    # Insucesso por loja (mín 20 pedidos, taxa > 10%)
+    c = sem1h['StatusOp'].value_counts().to_dict()
     lojas_criticas = []
     if 'LojaNome' in sem1h.columns:
         for loja, g in sem1h[sem1h['LojaNome'].str.strip().ne('')].groupby('LojaNome'):
-            t = len(g)
-            ins = (g['StatusOp'] == 'Insucesso').sum()
+            t = len(g); ins = (g['StatusOp'] == 'Insucesso').sum()
             if t >= 20 and ins / t > 0.10:
-                lojas_criticas.append({
-                    'loja': loja, 'total': t,
-                    'insucesso': ins, 'pct': ins / t * 100
-                })
+                lojas_criticas.append({'loja': loja, 'total': t, 'insucesso': ins, 'pct': ins/t*100})
     lojas_criticas.sort(key=lambda x: -x['pct'])
-
-    # Por grupo (contratante)
     grupos = {}
     if 'LojaGrupo' in sem1h.columns:
         for grp, g in sem1h[sem1h['LojaGrupo'].str.strip().ne('')].groupby('LojaGrupo'):
-            t = len(g)
-            ent = (g['StatusOp'] == 'Entregue').sum()
+            t = len(g); ent = (g['StatusOp'] == 'Entregue').sum()
             ins = (g['StatusOp'] == 'Insucesso').sum()
             grupos[grp] = {'total': t, 'entregue': ent, 'insucesso': ins,
                            'pct_ent': ent/t*100, 'pct_ins': ins/t*100}
-
-    return {'total': total, 'contagens': contagens,
-            'lojas_criticas': lojas_criticas, 'grupos': grupos}
+    return {'contagens': c, 'lojas_criticas': lojas_criticas, 'grupos': grupos}
 
 # ─── FORMATAÇÃO DAS MENSAGENS ────────────────────────────────────
+
 def fmt_status_grupos(grupos: dict) -> str:
-    if not grupos: return '_Sem dados de contratante_'
-    ordem = sorted(grupos.items(), key=lambda x: -x[1]['total'])
+    if not grupos: return '_Sem dados_'
     linhas = []
-    for grp, d in ordem:
-        nome_curto = grp.replace('GRUPO ','').replace(' DROGASIL','').title()[:20]
+    for grp, d in sorted(grupos.items(), key=lambda x: -x[1]['total']):
+        nome = grp.replace('GRUPO ','').replace(' DROGASIL','').title()[:22]
         e = emoji_sla(d['pct_ent'])
-        ins_str = f" | 🔄 {d['insucesso']} ins" if d['insucesso'] > 0 else ''
-        linhas.append(f"{e} *{nome_curto}*: {d['pct_ent']:.0f}% entregue ({d['total']} ped){ins_str}")
+        ins_str = f" | 🔄 {d['pct_ins']:.0f}% ins" if d['pct_ins'] >= 5 else ''
+        linhas.append(f"{e} *{nome}*: {d['pct_ent']:.0f}% ({d['total']} ped){ins_str}")
     return '\n'.join(linhas)
 
 
 def fmt_lojas_criticas(lojas: list) -> str:
     if not lojas: return ''
-    linhas = ['⚠️ *Lojas com alto insucesso (>10%):*']
+    linhas = ['⚠️ *Lojas com insucesso >10%:*']
     for l in lojas[:5]:
-        nome = l['loja'][:30]
-        linhas.append(f"  🔴 {nome}: {l['pct']:.0f}% ({l['insucesso']}/{l['total']} ped)")
+        linhas.append(f"  🔴 {l['loja'][:28]}: {l['pct']:.0f}% ({l['insucesso']}/{l['total']})")
     return '\n'.join(linhas)
 
+
+def fmt_prazo_polo_loja(df_grp: 'pd.DataFrame', top_lojas: int = 3) -> str:
+    """Breakdown por polo + top lojas para um subconjunto de pedidos."""
+    if df_grp.empty: return ''
+    linhas = []
+    polo_col = 'Polo' if 'Polo' in df_grp.columns else None
+    loja_col = 'LojaNome' if 'LojaNome' in df_grp.columns else None
+
+    if polo_col:
+        for polo, gp in df_grp.groupby(polo_col):
+            if not polo or str(polo).strip() == '': continue
+            n = len(gp)
+            linhas.append(f"  📍 *{polo}*: {n} ped")
+            if loja_col:
+                top = gp[loja_col].value_counts().head(top_lojas)
+                for loja, cnt in top.items():
+                    if loja and str(loja).strip():
+                        linhas.append(f"     └ {str(loja)[:26]}: {cnt}")
+    elif loja_col:
+        for loja, cnt in df_grp[loja_col].value_counts().head(5).items():
+            linhas.append(f"  └ {str(loja)[:28]}: {cnt}")
+    return '\n'.join(linhas)
 
 
 def emoji_sla(pct):
@@ -364,37 +373,58 @@ def resumo():
 
 @app.get("/painel")
 def painel():
-    """13h — Situação em tempo real do dia."""
-    hoje_s = date.today().strftime('%Y-%m-%d')
-    df = fetch(hoje_s, hoje_s)
+    """Operacional — chamado a cada 3h entre 08h e 20h (08,11,14,17,20).
+    Eixo: prazo SLA, não data de integração. Cobre o mês inteiro."""
+    hoje  = date.today()
+    amanha = hoje + timedelta(days=1)
+    mes_s  = hoje.replace(day=1).strftime('%Y-%m-%d')
+    hoje_s = hoje.strftime('%Y-%m-%d')
+    hora   = datetime.now().strftime('%H:%M')
 
+    df = fetch(mes_s, hoje_s)
     if df.empty:
-        return {"mensagem": f"⚠️ Sem pedidos integrados hoje ({hoje_s})"}
+        return {"mensagem": f"⚠️ Sem dados disponíveis ({hoje_s})"}
 
-    k = kpis(df)
-    sem1h = df[~df['Tipo_SLA'].str.contains('1Hr', na=False)]
-    pend_urgentes = sem1h[
-        (sem1h['Status_SLA']=='Pendente') &
-        (sem1h['SLA_calc'].notna()) &
-        (sem1h['SLA_calc'].apply(lambda x: x <= date.today() if x else False))
-    ]
+    sem1h = df[~df['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h['StatusOp'] = sem1h['Status'].map(STATUS_MAP).fillna('Outros')
 
-    msg = f"""📊 *PAINEL AGV — {datetime.now().strftime('%d/%m/%Y')} | 13h*
+    # Pendentes = tudo que ainda não foi entregue nem cancelado
+    abertos = sem1h[~sem1h['StatusOp'].isin(['Entregue', 'Cancelado', 'Devolução'])]
+
+    # Vencendo hoje: SLA = hoje, ainda em aberto
+    vence_hoje = abertos[abertos['SLA_calc'] == hoje]
+
+    # Em risco: SLA = amanhã, ainda em aberto
+    em_risco = abertos[abertos['SLA_calc'] == amanha]
+
+    # Já atrasados: SLA < hoje, não entregues
+    atrasados = abertos[abertos['SLA_calc'].apply(lambda x: x is not None and x < hoje)]
+
+    # Insucessos abertos (qualquer SLA)
+    insucessos = sem1h[sem1h['StatusOp'] == 'Insucesso']
+
+    def bloco(df_b, top=3):
+        return fmt_prazo_polo_loja(df_b, top_lojas=top) if not df_b.empty else '  ✅ Nenhum'
+
+    # Insucesso por loja (top 4)
+    ins_lojas = ''
+    if not insucessos.empty and 'LojaNome' in insucessos.columns:
+        top_ins = insucessos['LojaNome'].value_counts().head(4)
+        ins_lojas = '\n'.join(f"  └ {l[:28]}: {n}" for l, n in top_ins.items())
+
+    msg = f"""⚙️ *PAINEL OPERACIONAL — {hoje.strftime('%d/%m/%Y')} | {hora}*
 ━━━━━━━━━━━━━━━━━━━━━
-📦 *Pedidos de hoje*
-• Total integrados: {k['total']}
-• D+ (sem 1Hr): {k['sem1h']}
-• Já entregues: {k['entregues']}
-• Pendentes: {k['pendentes']}
-• Atrasados: {k['atrasados']}
-• SLA parcial: {emoji_sla(k['sla'])} *{k['sla']:.1f}%*
+🚨 *VENCENDO HOJE — {len(vence_hoje)} pedidos*
+{bloco(vence_hoje)}
 
-⏰ *Vencendo hoje (ainda pendentes): {len(pend_urgentes)}*
+⏳ *EM RISCO (SLA amanhã) — {len(em_risco)} pedidos*
+{bloco(em_risco)}
 
-🏢 *Status por Polo*
-{fmt_polo(k['polos'])}
+🔴 *JÁ ATRASADOS — {len(atrasados)} pedidos*
+{bloco(atrasados)}
 
-{fmt_alertas(k['cidades_criticas'])}
+🔄 *INSUCESSOS ABERTOS — {len(insucessos)} pedidos*
+{ins_lojas if ins_lojas else '  ✅ Nenhum'}
 ━━━━━━━━━━━━━━━━━━━━━"""
 
     return {"mensagem": msg.strip()}
@@ -416,16 +446,14 @@ def fechamento():
     k_hj  = kpis(df_hj)
     k_mes = kpis(df_mes) if not df_mes.empty else k_hj
 
-    # Divergências de SLA (nosso vs sistema)
     sem1h = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)]
     div_count = sem1h['Diff_SLA_dias'].notna().sum()
     div_neg   = (sem1h['Diff_SLA_dias'].fillna(0) < 0).sum()
     div_pos   = (sem1h['Diff_SLA_dias'].fillna(0) > 0).sum()
 
-    # Status operacional (mês)
-    st_mes = status_operacional(df_mes) if not df_mes.empty else {}
-    c = st_mes.get('contagens', {})
-    lojas_alert = fmt_lojas_criticas(st_mes.get('lojas_criticas', []))
+    st = status_operacional(df_mes) if not df_mes.empty else {}
+    c  = st.get('contagens', {})
+    lojas_alert = fmt_lojas_criticas(st.get('lojas_criticas', []))
 
     msg = f"""🌆 *FECHAMENTO AGV — {datetime.now().strftime('%d/%m/%Y')} | 18h*
 ━━━━━━━━━━━━━━━━━━━━━
@@ -448,12 +476,12 @@ def fechamento():
 • ✅ Entregues: {c.get('Entregue', 0)}
 • 🚚 Em Trânsito: {c.get('Em Trânsito', 0)}
 • 📬 Expedindo: {c.get('Expedindo', 0)}
-• 🔄 Insucesso/Reentrega: {c.get('Insucesso', 0)}
+• 🔄 Insucesso: {c.get('Insucesso', 0)}
 • ↩️ Devolução: {c.get('Devolução', 0)}
 • ❌ Cancelado: {c.get('Cancelado', 0)}
 
 📊 *Por Contratante (mês)*
-{fmt_status_grupos(st_mes.get('grupos', {}))}
+{fmt_status_grupos(st.get('grupos', {}))}
 {"" if not lojas_alert else chr(10) + lojas_alert}
 🔎 *Divergências SLA (nosso vs sistema)*
 • Pedidos com DataSLA diferente: {div_count}
