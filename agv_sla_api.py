@@ -115,7 +115,7 @@ def fetch(data_inicio: str, data_fim: str) -> pd.DataFrame:
     for col in ['CidadeDestino','CEP','LojaNome','LojaGrupo','Polo','DataConclusao','DataSLA_Sistema']:
         if col not in df.columns: df[col] = ''
 
-    # Normaliza nome da cidade (elimina duplicatas por capitalização: MONGAGUA vs Mongagua)
+    # Normaliza nome da cidade (elimina duplicatas por capitalização)
     df['CidadeDestino'] = df['CidadeDestino'].str.strip().str.title()
 
     # Calcula SLA
@@ -186,7 +186,7 @@ def kpis(df: pd.DataFrame) -> dict:
         for polo, g in sem1h[sem1h['Polo'].str.strip().ne('')].groupby('Polo'):
             ge = g[g['Status_SLA']!='Pendente']
             ne = len(ge); oe = (ge['Status_SLA']=='No Prazo').sum()
-            if ne == 0: continue  # polo sem entregas no período — oculta do report
+            if ne == 0: continue
             polos[polo] = {'total':len(g),'entregues':ne,'ok':oe,'sla':oe/ne*100}
 
     # Cidades críticas (atrasadas)
@@ -205,7 +205,93 @@ def kpis(df: pd.DataFrame) -> dict:
     }
 
 
+
+STATUS_MAP = {
+    'Entrega Realizada':                 'Entregue',
+    'Acareação: Entrega Realizada':      'Entregue',
+    'Chegada no Destinatário':           'Entregue',
+    'Coletado na Loja':                  'Entregue',
+    'Despachado':                        'Em Trânsito',
+    'Chegada na Base':                   'Em Trânsito',
+    'Transferência entre unidades':      'Em Trânsito',
+    'Rota de Entrega':                   'Em Trânsito',
+    'Integração Recebida':               'Expedindo',
+    'Não Coletado':                      'Expedindo',
+    'Coleta Cancelado pelo Remetente':   'Cancelado',
+    'Entrega Cancelada pelo Remetente':  'Cancelado',
+    'Cancelado pelo Destinatário':       'Cancelado',
+    'Cliente Ausente':                   'Insucesso',
+    'Localidade Não Atendida':           'Insucesso',
+    'Endereço Não Localizado':           'Insucesso',
+    'Número não Localizado':             'Insucesso',
+    'Estabelecimento Fechado':           'Insucesso',
+    'Destinatário Não Encontrado':       'Insucesso',
+    'Recusado por Terceiro':             'Insucesso',
+    'Outras Ocorrências':                'Insucesso',
+    'Em Devolução':                      'Devolução',
+    'Devolvido':                         'Devolução',
+    'Pedido Extraviado':                 'Problema',
+    'Pedido Danificado':                 'Problema',
+    'Aguardando Tratativa':              'Problema',
+}
+
+
+def status_operacional(df: pd.DataFrame) -> dict:
+    """Retorna contagens por status e lojas com insucesso crítico."""
+    sem1h = df[~df['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h['StatusOp'] = sem1h['Status'].map(STATUS_MAP).fillna('Outros')
+    total = len(sem1h)
+
+    contagens = sem1h['StatusOp'].value_counts().to_dict()
+
+    # Insucesso por loja (mín 20 pedidos, taxa > 10%)
+    lojas_criticas = []
+    if 'LojaNome' in sem1h.columns:
+        for loja, g in sem1h[sem1h['LojaNome'].str.strip().ne('')].groupby('LojaNome'):
+            t = len(g)
+            ins = (g['StatusOp'] == 'Insucesso').sum()
+            if t >= 20 and ins / t > 0.10:
+                lojas_criticas.append({
+                    'loja': loja, 'total': t,
+                    'insucesso': ins, 'pct': ins / t * 100
+                })
+    lojas_criticas.sort(key=lambda x: -x['pct'])
+
+    # Por grupo (contratante)
+    grupos = {}
+    if 'LojaGrupo' in sem1h.columns:
+        for grp, g in sem1h[sem1h['LojaGrupo'].str.strip().ne('')].groupby('LojaGrupo'):
+            t = len(g)
+            ent = (g['StatusOp'] == 'Entregue').sum()
+            ins = (g['StatusOp'] == 'Insucesso').sum()
+            grupos[grp] = {'total': t, 'entregue': ent, 'insucesso': ins,
+                           'pct_ent': ent/t*100, 'pct_ins': ins/t*100}
+
+    return {'total': total, 'contagens': contagens,
+            'lojas_criticas': lojas_criticas, 'grupos': grupos}
+
 # ─── FORMATAÇÃO DAS MENSAGENS ────────────────────────────────────
+def fmt_status_grupos(grupos: dict) -> str:
+    if not grupos: return '_Sem dados de contratante_'
+    ordem = sorted(grupos.items(), key=lambda x: -x[1]['total'])
+    linhas = []
+    for grp, d in ordem:
+        nome_curto = grp.replace('GRUPO ','').replace(' DROGASIL','').title()[:20]
+        e = emoji_sla(d['pct_ent'])
+        ins_str = f" | 🔄 {d['insucesso']} ins" if d['insucesso'] > 0 else ''
+        linhas.append(f"{e} *{nome_curto}*: {d['pct_ent']:.0f}% entregue ({d['total']} ped){ins_str}")
+    return '\n'.join(linhas)
+
+
+def fmt_lojas_criticas(lojas: list) -> str:
+    if not lojas: return ''
+    linhas = ['⚠️ *Lojas com alto insucesso (>10%):*']
+    for l in lojas[:5]:
+        nome = l['loja'][:30]
+        linhas.append(f"  🔴 {nome}: {l['pct']:.0f}% ({l['insucesso']}/{l['total']} ped)")
+    return '\n'.join(linhas)
+
+
 
 def emoji_sla(pct):
     if pct >= 95: return '🟢'
@@ -336,6 +422,11 @@ def fechamento():
     div_neg   = (sem1h['Diff_SLA_dias'].fillna(0) < 0).sum()
     div_pos   = (sem1h['Diff_SLA_dias'].fillna(0) > 0).sum()
 
+    # Status operacional (mês)
+    st_mes = status_operacional(df_mes) if not df_mes.empty else {}
+    c = st_mes.get('contagens', {})
+    lojas_alert = fmt_lojas_criticas(st_mes.get('lojas_criticas', []))
+
     msg = f"""🌆 *FECHAMENTO AGV — {datetime.now().strftime('%d/%m/%Y')} | 18h*
 ━━━━━━━━━━━━━━━━━━━━━
 📦 *Dia de hoje*
@@ -353,6 +444,17 @@ def fechamento():
 🏢 *Ranking de Polos (mês)*
 {fmt_polo(k_mes['polos'], top=7)}
 
+📋 *Status operacional (mês)*
+• ✅ Entregues: {c.get('Entregue', 0)}
+• 🚚 Em Trânsito: {c.get('Em Trânsito', 0)}
+• 📬 Expedindo: {c.get('Expedindo', 0)}
+• 🔄 Insucesso/Reentrega: {c.get('Insucesso', 0)}
+• ↩️ Devolução: {c.get('Devolução', 0)}
+• ❌ Cancelado: {c.get('Cancelado', 0)}
+
+📊 *Por Contratante (mês)*
+{fmt_status_grupos(st_mes.get('grupos', {}))}
+{"" if not lojas_alert else chr(10) + lojas_alert}
 🔎 *Divergências SLA (nosso vs sistema)*
 • Pedidos com DataSLA diferente: {div_count}
 • Sistema mais apertado: {div_neg} | mais folgado: {div_pos}
