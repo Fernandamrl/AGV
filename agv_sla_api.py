@@ -1,5 +1,5 @@
 """
-AGV Logistica -- API de Reports de SLA  (v10)
+AGV Logistica -- API de Reports de SLA  (v11)
 FastAPI que o n8n chama para gerar os reports do WhatsApp.
 
 ENDPOINTS:
@@ -8,7 +8,6 @@ ENDPOINTS:
     GET /fechamento  -> Report das 18h
     GET /health      -> Healthcheck
 """
-
 from fastapi import FastAPI
 from datetime import datetime, timedelta, date
 import unicodedata, ast, requests, pandas as pd, holidays
@@ -174,7 +173,7 @@ def kpis(df: pd.DataFrame) -> dict:
     pend = int((sem1h['Status_SLA']=='Pendente').sum())
     sla  = ok/n*100 if n else 0
 
-    # Por polo: ok (no prazo), atr (atrasados), pen (pendentes)
+    # Por polo: ok (no prazo), atr (entregues atrasados), pen (pendentes)
     polos = {}
     if 'Polo' in sem1h.columns:
         for polo, g in sem1h[sem1h['Polo'].str.strip().ne('')].groupby('Polo'):
@@ -203,7 +202,6 @@ def kpis(df: pd.DataFrame) -> dict:
 STATUS_MAP = {
     'Entrega Realizada':                    'Entregue',
     'Chegada no Destinatario':              'Entregue',
-    'Chegada no Destinatario':              'Entregue',
     'Coletado na Loja':                     'Entregue',
     'Despachado':                           'Em Transito',
     'Chegada na Base':                      'Em Transito',
@@ -229,10 +227,6 @@ STATUS_MAP = {
     'Aguardando Tratativa':                 'Problema',
     # Com acentos
     'Acareacao: Entrega Realizada':         'Entregue',
-    'Chegada no Destinatario':              'Entregue',
-    'Transferencia entre unidades':         'Em Transito',
-    'Integracao Recebida':                  'Expedindo',
-    'Nao Coletado':                         'Expedindo',
     'Cancelado pelo Destinatario':          'Cancelado',
     'Localidade Nao Atendida':              'Insucesso',
     'Endereco Nao Localizado':              'Insucesso',
@@ -241,7 +235,6 @@ STATUS_MAP = {
     'Outras Ocorrencias':                   'Insucesso',
     'Em Devolucao':                         'Devolucao',
 }
-
 
 def _apply_status_map(series):
     """Aplica STATUS_MAP e tenta sem acento como fallback."""
@@ -272,7 +265,7 @@ def status_operacional(df: pd.DataFrame) -> dict:
                 lojas_criticas.append({'loja':loja,'total':t,'insucesso':int(ins),'pct':ins/t*100})
     lojas_criticas.sort(key=lambda x: -x['pct'])
 
-    # Por grupo/contratante: ok / atr / pen (mesmo criterio que polo)
+    # Por grupo/contratante: ok / atr (entregues atrasados) / pen (pendentes)
     grupos = {}
     if 'LojaGrupo' in sem1h.columns:
         for grp, g in sem1h[sem1h['LojaGrupo'].str.strip().ne('')].groupby('LojaGrupo'):
@@ -313,7 +306,7 @@ def fmt_polo(polos: dict, top=7) -> str:
     return '\n'.join(linhas)
 
 def fmt_polo_resumo(polos: dict, top=5) -> str:
-    """Para /resumo: sla% | ok ok / total ped"""
+    """Para /resumo: sla% | ok / total ped"""
     if not polos: return '_Sem dados de polo_'
     ordenados = sorted(polos.items(), key=lambda x: x[1]['entregues'], reverse=True)[:top]
     linhas = []
@@ -373,21 +366,21 @@ def resumo():
 
     msg = (
         f"🌅 *RESUMO AGV -- {data_fmt} | {hora}*\n"
-        f"━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━\n"
         f"📦 *Ontem ({ontem})*\n"
         f"• Pedidos D+: {k_on['sem1h']}\n"
         f"• Entregues: {k_on['entregues']}\n"
-        f"• No Prazo: {k_on['ok']} | Atrasados: {k_on['atrasados']}\n"
+        f"• No Prazo: {k_on['ok']} | ATR: {k_on['atrasados']}\n"
         f"• SLA: {e_on} *{k_on['sla']:.1f}%*\n"
         f"\n"
         f"📅 *Acumulado do mes*\n"
         f"• Total D+: {k_mes['sem1h']}\n"
         f"• SLA mes: {e_mes} *{k_mes['sla']:.1f}%*\n"
-        f"• Atrasados mes: {k_mes['atrasados']}\n"
+        f"• ATR mes: {k_mes['atrasados']}\n"
         f"\n"
         f"🏢 *SLA por Polo (ontem)*\n"
         f"{fmt_polo_resumo(k_on['polos'])}\n"
-        f"━━━━━━━━━━━━━━━━━"
+        f"━━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
 
@@ -428,28 +421,29 @@ def painel():
     sem1h_mes['StatusOp']  = _apply_status_map(sem1h_mes['Status'])
     sem1h_mes['DataSLA_d'] = pd.to_datetime(sem1h_mes['DataSLA_Sistema'], errors='coerce').dt.date
 
-    abertos_mes   = sem1h_mes[~sem1h_mes['StatusOp'].isin(['Entregue','Cancelado','Devolucao'])].copy()
-    atrasados_mes = abertos_mes[abertos_mes['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
-    n_atrasados   = len(atrasados_mes)
+    # Vencidos = abertos (nao entregues) com SLA ja expirado
+    abertos_mes  = sem1h_mes[~sem1h_mes['StatusOp'].isin(['Entregue','Cancelado','Devolucao'])].copy()
+    vencidos_mes = abertos_mes[abertos_mes['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
+    n_vencidos   = len(vencidos_mes)
 
     linhas_cont = []
-    if not atrasados_mes.empty:
-        col = 'LojaGrupo' if 'LojaGrupo' in atrasados_mes.columns else 'LojaNome'
-        for nome, cnt in atrasados_mes[col].value_counts().items():
+    if not vencidos_mes.empty:
+        col = 'LojaGrupo' if 'LojaGrupo' in vencidos_mes.columns else 'LojaNome'
+        for nome, cnt in vencidos_mes[col].value_counts().items():
             if not nome or str(nome).strip() == '': continue
             nome_c = str(nome).replace('GRUPO ','').replace(' DROGASIL','').title()[:30]
-            linhas_cont.append(f"  🔴 {nome_c}: {cnt} atrasados")
-    cont_fmt = '\n'.join(linhas_cont) if linhas_cont else '  Nenhum atrasado'
+            linhas_cont.append(f"  🔴 {nome_c}: {cnt} vencidos")
+    cont_fmt = '\n'.join(linhas_cont) if linhas_cont else '  Nenhum vencido'
 
     linhas_polo = []
-    if not atrasados_mes.empty and 'Polo' in atrasados_mes.columns:
-        for polo, cnt in atrasados_mes[atrasados_mes['Polo'].str.strip().ne('')]['Polo'].value_counts().items():
-            linhas_polo.append(f"  🔴 {polo}: {cnt} atrasados")
-    polo_fmt = '\n'.join(linhas_polo) if linhas_polo else '  Nenhum atrasado'
+    if not vencidos_mes.empty and 'Polo' in vencidos_mes.columns:
+        for polo, cnt in vencidos_mes[vencidos_mes['Polo'].str.strip().ne('')]['Polo'].value_counts().items():
+            linhas_polo.append(f"  🔴 {polo}: {cnt} vencidos")
+    polo_fmt = '\n'.join(linhas_polo) if linhas_polo else '  Nenhum vencido'
 
     msg = (
         f"⚙️ *PAINEL -- {hoje_fmt} | {hora}*\n"
-        f"━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━\n"
         f"📋 *Status operacional (dia)*\n"
         f"• ✅ Entregues: {c.get('Entregue', 0)}\n"
         f"• 🚚 Em Transito: {c.get('Em Transito', 0)}\n"
@@ -457,14 +451,14 @@ def painel():
         f"• 🔄 Insucesso: {c.get('Insucesso', 0)}\n"
         f"• ↩️ Devolucao: {c.get('Devolucao', 0)}\n"
         f"• ❌ Cancelado: {c.get('Cancelado', 0)}\n"
-        f"• ⌛ Atrasados: {n_atrasados}\n"
+        f"• ⌛ Vencidos: {n_vencidos}\n"
         f"\n"
-        f"📋 *Por Contratante (atrasados -- mes)*\n"
+        f"📋 *Por Contratante (vencidos -- mes)*\n"
         f"{cont_fmt}\n"
         f"\n"
-        f"🏢 *Por Polo (atrasados -- mes)*\n"
+        f"🏢 *Por Polo (vencidos -- mes)*\n"
         f"{polo_fmt}\n"
-        f"━━━━━━━━━━━━━━━━"
+        f"━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
 
@@ -502,14 +496,14 @@ def fechamento():
         f"📦 *Dia de hoje*\n"
         f"• Integrados: {k_hj['total']} | D+: {k_hj['sem1h']}\n"
         f"• Entregues: {k_hj['entregues']} | Pendentes: {k_hj['pendentes']}\n"
-        f"• Atrasados: {k_hj['atrasados']}\n"
+        f"• ATR: {k_hj['atrasados']}\n"
         f"• SLA do dia: {e_hj} *{k_hj['sla']:.1f}%*\n"
         f"\n"
         f"📅 *Acumulado do mes*\n"
         f"• Total D+: {k_mes['sem1h']}\n"
         f"• Entregues: {k_mes['entregues']}\n"
         f"• SLA mes: {e_mes} *{k_mes['sla']:.1f}%*\n"
-        f"• Atrasados: {k_mes['atrasados']}\n"
+        f"• ATR: {k_mes['atrasados']}\n"
         f"\n"
         f"📋 *Status operacional (mes)*\n"
         f"• ✅ Entregues: {c.get('Entregue', 0)}\n"
@@ -518,8 +512,8 @@ def fechamento():
         f"• 🔄 Insucesso: {c.get('Insucesso', 0)}\n"
         f"• ↩️ Devolucao: {c.get('Devolucao', 0)}\n"
         f"• ❌ Cancelado: {c.get('Cancelado', 0)}\n"
-        f"• ⌛ Atrasados: {k_mes['atrasados']}\n"
-         f"\n"
+        f"• ⌛ Vencidos: {k_mes['pendentes']}\n"
+        f"\n"
         f"🏢 *Polos SLA mes*\n"
         f"{polos_fmt}\n"
         f"\n"
