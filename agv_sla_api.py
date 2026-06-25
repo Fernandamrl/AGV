@@ -498,7 +498,7 @@ def fechamento():
 
     msg = (
         f"🌆 *FECHAMENTO AGV -- {data_fmt} | {hora}*\n"
-        f"━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━\n"
         f"📦 *Dia de hoje*\n"
         f"• Integrados: {k_hj['total']} | D+: {k_hj['sem1h']}\n"
         f"• Entregues: {k_hj['entregues']} | Pendentes: {k_hj['pendentes']}\n"
@@ -511,9 +511,6 @@ def fechamento():
         f"• SLA mes: {e_mes} *{k_mes['sla']:.1f}%*\n"
         f"• Atrasados: {k_mes['atrasados']}\n"
         f"\n"
-        f"🏢 *Polos -- SLA mes*\n"
-        f"{polos_fmt}\n"
-        f"\n"
         f"📋 *Status operacional (mes)*\n"
         f"• ✅ Entregues: {c.get('Entregue', 0)}\n"
         f"• 🚚 Em Transito: {c.get('Em Transito', 0)}\n"
@@ -522,11 +519,14 @@ def fechamento():
         f"• ↩️ Devolucao: {c.get('Devolucao', 0)}\n"
         f"• ❌ Cancelado: {c.get('Cancelado', 0)}\n"
         f"• ⌛ Atrasados: {k_mes['atrasados']}\n"
+         f"\n"
+        f"🏢 *Polos SLA mes*\n"
+        f"{polos_fmt}\n"
         f"\n"
         f"📊 *Por Contratante (mes)*\n"
         f"{grupos_fmt}"
         f"{lojas_section}\n"
-        f"━━━━━━━━━━━━━━━━━"
+        f"━━━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
 
