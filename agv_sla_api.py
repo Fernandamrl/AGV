@@ -449,7 +449,7 @@ def painel():
 
     msg = (
         f"⚙️ *PAINEL -- {hoje_fmt} | {hora}*\n"
-        f"━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━\n"
         f"📋 *Status operacional (dia)*\n"
         f"• ✅ Entregues: {c.get('Entregue', 0)}\n"
         f"• 🚚 Em Transito: {c.get('Em Transito', 0)}\n"
@@ -464,7 +464,7 @@ def painel():
         f"\n"
         f"🏢 *Por Polo (atrasados -- mes)*\n"
         f"{polo_fmt}\n"
-        f"━━━━━━━━━━━━━━━━━"
+        f"━━━━━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
 
@@ -498,7 +498,7 @@ def fechamento():
 
     msg = (
         f"🌆 *FECHAMENTO AGV -- {data_fmt} | {hora}*\n"
-        f"━━━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━━━━━━━\n"
         f"📦 *Dia de hoje*\n"
         f"• Integrados: {k_hj['total']} | D+: {k_hj['sem1h']}\n"
         f"• Entregues: {k_hj['entregues']} | Pendentes: {k_hj['pendentes']}\n"
