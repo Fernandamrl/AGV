@@ -302,7 +302,7 @@ def fmt_polo(polos: dict, top=5) -> str:
     linhas = []
     for nome, d in ordenados:
         e = emoji_sla(d['sla'])
-        linhas.append(f"{e} *{nome}*: {d['sla']:.0f}% ({d['ok']}/{d['entregues']})")
+        linhas.append(f"{e} *{nome}*: {d['sla']:.0f}% | {d['ok']} entregues / {d['total']} ped")
     return '\n'.join(linhas)
 
 def fmt_alertas(cidades: dict) -> str:
@@ -339,7 +339,7 @@ def resumo():
     k_mes = kpis(df_mes) if not df_mes.empty else k_on
 
     msg = f"""🌅 *RESUMO AGV — {datetime.now().strftime('%d/%m/%Y')} | 07h*
-━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━
 📦 *Ontem ({ontem})*
 • Pedidos D+: {k_on['sem1h']}
 • Entregues: {k_on['entregues']}
@@ -355,7 +355,7 @@ def resumo():
 {fmt_polo(k_on['polos'])}
 
 {fmt_alertas(k_on['cidades_criticas'])}
-━━━━━━━━━━━━━━━━━━"""
+━━━━━━━━━━━━━━━━━━━━━"""
 
     return {"mensagem": msg.strip()}
 
@@ -391,7 +391,7 @@ def painel():
     vence_aman = abertos[abertos['DataSLA_d'] == amanha]
 
     msg = f"""⚙️ *PAINEL — {hoje.strftime('%d/%m/%Y')} | {hora}*
-━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━
 📋 *Status operacional (dia)*
 • ✅ Entregues: {c.get('Entregue', 0)}
 • 🚚 Em Trânsito: {c.get('Em Trânsito', 0)}
@@ -408,7 +408,7 @@ def painel():
 
 ⏳ *VENCEM AMANHÃ: {len(vence_aman)} pedidos*
 {fmt_polo_resumo(vence_aman)}
-━━━━━━━━━━━━━━━━━━"""
+━━━━━━━━━━━━━━━━━━━━━"""
 
     return {"mensagem": msg.strip()}
 
@@ -438,7 +438,7 @@ def fechamento():
     lojas_alert = fmt_lojas_criticas(st.get('lojas_criticas', []))
 
     msg = f"""🌆 *FECHAMENTO AGV — {datetime.now().strftime('%d/%m/%Y')} | 18h*
-━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━
 📦 *Dia de hoje*
 • Integrados: {k_hj['total']} | D+: {k_hj['sem1h']}
 • Entregues: {k_hj['entregues']} | Pendentes: {k_hj['pendentes']}
@@ -470,7 +470,7 @@ def fechamento():
 • Sistema mais apertado: {div_neg} | mais folgado: {div_pos}
 
 {fmt_alertas(k_mes['cidades_criticas'])}
-━━━━━━━━━━━━━━━━━━"""
+━━━━━━━━━━━━━━━━━━━━━"""
 
     return {"mensagem": msg.strip()}
 
