@@ -338,7 +338,7 @@ def resumo():
     k_on  = kpis(df_on)
     k_mes = kpis(df_mes) if not df_mes.empty else k_on
 
-    msg = f"""🌅 *RESUMO AGV — {datetime.now().strftime('%d/%m/%Y')} | 07h*
+    msg = f"""🌅 *RESUMO AGV — {pd.Timestamp.now('America/Sao_Paulo').strftime('%d/%m/%Y')} | 07h*
 ━━━━━━━━━━━━━━━━━━━━━
 📦 *Ontem ({ontem})*
 • Pedidos D+: {k_on['sem1h']}
@@ -363,32 +363,65 @@ def resumo():
 @app.get("/painel")
 def painel():
     """Operacional — a cada 3h (08,11,14,17,20). Eixo: DataSLA_Sistema.
-    Busca últimos 10 dias — cobre todos os pedidos pendentes operacionais."""
+    Chamada 1: 10 dias — status operacional do dia.
+    Chamada 2: mês todo — atrasados por contratante e polo."""
     hoje   = date.today()
-    amanha = hoje + timedelta(days=1)
-    inicio = (hoje - timedelta(days=10)).strftime('%Y-%m-%d')
+    inicio_10d = (hoje - timedelta(days=10)).strftime('%Y-%m-%d')
+    mes_s  = hoje.replace(day=1).strftime('%Y-%m-%d')
     hoje_s = hoje.strftime('%Y-%m-%d')
-    hora   = datetime.now().strftime('%H:%M')
+    hora   = pd.Timestamp.now('America/Sao_Paulo').strftime('%H:%M')
 
-    df = fetch(inicio, hoje_s)  # 1 chamada só, 7 dias
-    if df.empty:
+    # ── Chamada 1: 10 dias — status operacional do dia ──
+    df10 = fetch(inicio_10d, hoje_s)
+    if df10.empty:
         return {"mensagem": f"⚠️ Sem dados ({hoje_s})"}
 
-    sem1h = df[~df['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
-    sem1h['StatusOp']  = sem1h['Status'].map(STATUS_MAP).fillna('Outros')
-    sem1h['DataSLA_d'] = pd.to_datetime(sem1h['DataSLA_Sistema'], errors='coerce').dt.date
-    sem1h['DataInteg_d'] = pd.to_datetime(sem1h['DataIntegracao'], utc=True, errors='coerce').dt.tz_convert('America/Sao_Paulo').dt.date
-
-    # Status operacional — só pedidos de hoje
-    hoje_df = sem1h[sem1h['DataInteg_d'] == hoje]
+    sem1h_10 = df10[~df10['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h_10['StatusOp']    = sem1h_10['Status'].map(STATUS_MAP).fillna('Outros')
+    sem1h_10['DataInteg_d'] = (
+        pd.to_datetime(sem1h_10['DataIntegracao'], utc=True, errors='coerce')
+        .dt.tz_convert('America/Sao_Paulo').dt.date
+    )
+    hoje_df = sem1h_10[sem1h_10['DataInteg_d'] == hoje]
     c = hoje_df['StatusOp'].value_counts().to_dict()
 
-    # Pendentes operacionais — todos os 7 dias
-    abertos = sem1h[~sem1h['StatusOp'].isin(['Entregue','Cancelado','Devolução'])].copy()
+    # ── Chamada 2: mês todo — atrasados ──
+    df_mes = pd.DataFrame()
+    try:
+        df_mes = fetch(mes_s, hoje_s)
+    except Exception:
+        try:
+            inicio_20d = (hoje - timedelta(days=20)).strftime('%Y-%m-%d')
+            df_mes = fetch(inicio_20d, hoje_s)
+        except Exception:
+            df_mes = df10  # último recurso
 
-    atrasados  = abertos[abertos['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
-    vence_hoje = abertos[abertos['DataSLA_d'].apply(lambda x: pd.notna(x) and x == hoje)]
-    vence_aman = abertos[abertos['DataSLA_d'].apply(lambda x: pd.notna(x) and x == amanha)]
+    sem1h_mes = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h_mes['StatusOp']  = sem1h_mes['Status'].map(STATUS_MAP).fillna('Outros')
+    sem1h_mes['DataSLA_d'] = pd.to_datetime(sem1h_mes['DataSLA_Sistema'], errors='coerce').dt.date
+
+    abertos_mes  = sem1h_mes[~sem1h_mes['StatusOp'].isin(['Entregue','Cancelado','Devolução'])].copy()
+    atrasados_mes = abertos_mes[abertos_mes['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
+    n_atrasados   = len(atrasados_mes)
+
+    # ── Formatadores locais ──
+    def fmt_contratantes(df_at):
+        if df_at.empty: return '  ✅ Nenhum atrasado'
+        col = 'LojaGrupo' if 'LojaGrupo' in df_at.columns else 'LojaNome'
+        linhas = []
+        for nome, cnt in df_at[col].value_counts().items():
+            if not nome or str(nome).strip() == '': continue
+            nome_c = str(nome).replace('GRUPO ','').replace(' DROGASIL','').title()[:30]
+            linhas.append(f"  🔴 {nome_c}: {cnt} atrasados")
+        return '\n'.join(linhas) if linhas else '  ✅ Nenhum atrasado'
+
+    def fmt_polos_atrasados(df_at):
+        if df_at.empty: return '  ✅ Nenhum atrasado'
+        if 'Polo' not in df_at.columns: return f"  {len(df_at)} atrasados (sem polo)"
+        linhas = []
+        for polo, cnt in df_at[df_at['Polo'].str.strip().ne('')]['Polo'].value_counts().items():
+            linhas.append(f"  🔴 {polo}: {cnt} atrasados")
+        return '\n'.join(linhas) if linhas else '  ✅ Nenhum atrasado'
 
     msg = f"""⚙️ *PAINEL — {hoje.strftime('%d/%m/%Y')} | {hora}*
 ━━━━━━━━━━━━━━━━━━━━━
@@ -399,15 +432,13 @@ def painel():
 • 🔄 Insucesso: {c.get('Insucesso', 0)}
 • ↩️ Devolução: {c.get('Devolução', 0)}
 • ❌ Cancelado: {c.get('Cancelado', 0)}
+• ⌛ Atrasados: {n_atrasados}
 
-🔴 *ATRASADOS: {len(atrasados)} pedidos*
-{fmt_polo_lojas(atrasados)}
+📋 *Por Contratante (atrasados — mês)*
+{fmt_contratantes(atrasados_mes)}
 
-🚨 *VENCEM HOJE: {len(vence_hoje)} pedidos*
-{fmt_polo_lojas(vence_hoje)}
-
-⏳ *VENCEM AMANHÃ: {len(vence_aman)} pedidos*
-{fmt_polo_resumo(vence_aman)}
+🏢 *Por Polo (atrasados — mês)*
+{fmt_polos_atrasados(atrasados_mes)}
 ━━━━━━━━━━━━━━━━━━━━━"""
 
     return {"mensagem": msg.strip()}
@@ -437,46 +468,8 @@ def fechamento():
     c  = st.get('contagens', {})
     lojas_alert = fmt_lojas_criticas(st.get('lojas_criticas', []))
 
-    msg = f"""🌆 *FECHAMENTO AGV — {datetime.now().strftime('%d/%m/%Y')} | 18h*
+    msg = f"""🌆 *FECHAMENTO AGV — {pd.Timestamp.now('America/Sao_Paulo').strftime('%d/%m/%Y')} | 18h*
 ━━━━━━━━━━━━━━━━━━━━━
 📦 *Dia de hoje*
 • Integrados: {k_hj['total']} | D+: {k_hj['sem1h']}
-• Entregues: {k_hj['entregues']} | Pendentes: {k_hj['pendentes']}
-• Atrasados: {k_hj['atrasados']}
-• SLA do dia: {emoji_sla(k_hj['sla'])} *{k_hj['sla']:.1f}%*
-
-📅 *Acumulado do mês*
-• Total D+: {k_mes['sem1h']}
-• Entregues: {k_mes['entregues']}
-• SLA mês: {emoji_sla(k_mes['sla'])} *{k_mes['sla']:.1f}%*
-• Atrasados: {k_mes['atrasados']}
-
-🏢 *Ranking de Polos (mês)*
-{fmt_polo(k_mes['polos'], top=7)}
-
-📋 *Status operacional (mês)*
-• ✅ Entregues: {c.get('Entregue', 0)}
-• 🚚 Em Trânsito: {c.get('Em Trânsito', 0)}
-• 📬 Expedindo: {c.get('Expedindo', 0)}
-• 🔄 Insucesso: {c.get('Insucesso', 0)}
-• ↩️ Devolução: {c.get('Devolução', 0)}
-• ❌ Cancelado: {c.get('Cancelado', 0)}
-
-📊 *Por Contratante (mês)*
-{fmt_status_grupos(st.get('grupos', {}))}
-{"" if not lojas_alert else chr(10) + lojas_alert}
-🔎 *Divergências SLA (nosso vs sistema)*
-• Pedidos com DataSLA diferente: {div_count}
-• Sistema mais apertado: {div_neg} | mais folgado: {div_pos}
-
-{fmt_alertas(k_mes['cidades_criticas'])}
-━━━━━━━━━━━━━━━━━━━━━"""
-
-    return {"mensagem": msg.strip()}
-
-
-# ─── START ────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+• Entr
