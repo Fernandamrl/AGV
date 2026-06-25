@@ -362,33 +362,33 @@ def resumo():
 
 @app.get("/painel")
 def painel():
-    """Operacional — a cada 3h (08,11,14,17,20). Eixo: DataSLA_Sistema."""
+    """Operacional — a cada 3h (08,11,14,17,20). Eixo: DataSLA_Sistema.
+    Busca últimos 10 dias — cobre todos os pedidos pendentes operacionais."""
     hoje   = date.today()
     amanha = hoje + timedelta(days=1)
-    mes_s  = hoje.replace(day=1).strftime('%Y-%m-%d')
+    inicio = (hoje - timedelta(days=10)).strftime('%Y-%m-%d')
     hoje_s = hoje.strftime('%Y-%m-%d')
     hora   = datetime.now().strftime('%H:%M')
 
-    df_mes  = fetch(mes_s, hoje_s)
-    df_hoje = fetch(hoje_s, hoje_s)
-    if df_mes.empty:
+    df = fetch(inicio, hoje_s)  # 1 chamada só, 7 dias
+    if df.empty:
         return {"mensagem": f"⚠️ Sem dados ({hoje_s})"}
 
-    sem1h = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
-    sem1h['StatusOp'] = sem1h['Status'].map(STATUS_MAP).fillna('Outros')
+    sem1h = df[~df['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h['StatusOp']  = sem1h['Status'].map(STATUS_MAP).fillna('Outros')
     sem1h['DataSLA_d'] = pd.to_datetime(sem1h['DataSLA_Sistema'], errors='coerce').dt.date
+    sem1h['DataInteg_d'] = pd.to_datetime(sem1h['DataIntegracao'], utc=True, errors='coerce').dt.tz_convert('America/Sao_Paulo').dt.date
 
-    # Status operacional — pedidos de hoje
-    hoje_sem1h = df_hoje[~df_hoje['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
-    hoje_sem1h['StatusOp'] = hoje_sem1h['Status'].map(STATUS_MAP).fillna('Outros')
-    c = hoje_sem1h['StatusOp'].value_counts().to_dict()
+    # Status operacional — só pedidos de hoje
+    hoje_df = sem1h[sem1h['DataInteg_d'] == hoje]
+    c = hoje_df['StatusOp'].value_counts().to_dict()
 
-    # Pedidos em aberto (não entregues, não cancelados) — mês inteiro
+    # Pendentes operacionais — todos os 7 dias
     abertos = sem1h[~sem1h['StatusOp'].isin(['Entregue','Cancelado','Devolução'])].copy()
 
     atrasados  = abertos[abertos['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
-    vence_hoje = abertos[abertos['DataSLA_d'] == hoje]
-    vence_aman = abertos[abertos['DataSLA_d'] == amanha]
+    vence_hoje = abertos[abertos['DataSLA_d'].apply(lambda x: pd.notna(x) and x == hoje)]
+    vence_aman = abertos[abertos['DataSLA_d'].apply(lambda x: pd.notna(x) and x == amanha)]
 
     msg = f"""⚙️ *PAINEL — {hoje.strftime('%d/%m/%Y')} | {hora}*
 ━━━━━━━━━━━━━━━━━━━━━
