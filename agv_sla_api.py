@@ -386,7 +386,7 @@ def painel():
     # Pedidos em aberto (não entregues, não cancelados) — mês inteiro
     abertos = sem1h[~sem1h['StatusOp'].isin(['Entregue','Cancelado','Devolução'])].copy()
 
-    atrasados  = abertos[abertos['DataSLA_d'].apply(lambda x: x is not None and x < hoje)]
+    atrasados  = abertos[abertos['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
     vence_hoje = abertos[abertos['DataSLA_d'] == hoje]
     vence_aman = abertos[abertos['DataSLA_d'] == amanha]
 
