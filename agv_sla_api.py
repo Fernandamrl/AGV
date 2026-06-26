@@ -1,5 +1,5 @@
 """
-AGV Logistica -- API de Reports de SLA  (v11)
+AGV Logistica -- API de Reports de SLA  (v12)
 FastAPI que o n8n chama para gerar os reports do WhatsApp.
 """
 from fastapi import FastAPI
@@ -254,15 +254,6 @@ def fmt_polo(polos: dict, top=7) -> str:
         )
     return '\n'.join(linhas)
 
-def fmt_polo_resumo(polos: dict, top=5) -> str:
-    if not polos: return '_Sem dados de polo_'
-    ordenados = sorted(polos.items(), key=lambda x: x[1]['entregues'], reverse=True)[:top]
-    linhas = []
-    for nome, d in ordenados:
-        e = emoji_circle(d['sla'])
-        linhas.append(f"{e} *{nome}*: {d['sla']:.0f}% | {d['ok']} ok / {d['total']} ped")
-    return '\n'.join(linhas)
-
 def fmt_status_grupos(grupos: dict) -> str:
     if not grupos: return '_Sem dados_'
     linhas = []
@@ -288,38 +279,74 @@ def health():
 
 @app.get("/resumo")
 def resumo():
-    hoje   = date.today()
-    ontem  = (hoje - timedelta(days=1)).strftime('%Y-%m-%d')
-    mes_s  = hoje.replace(day=1).strftime('%Y-%m-%d')
-    hoje_s = hoje.strftime('%Y-%m-%d')
-    ts       = now_brt()
-    data_fmt = ts.strftime('%d/%m/%Y')
-    hora     = ts.strftime('%H:%M')
-    df_on  = fetch(ontem, ontem)
+    hoje       = date.today()
+    ontem      = hoje - timedelta(days=1)
+    inicio_10d = (hoje - timedelta(days=10)).strftime('%Y-%m-%d')
+    mes_s      = hoje.replace(day=1).strftime('%Y-%m-%d')
+    hoje_s     = hoje.strftime('%Y-%m-%d')
+    ts         = now_brt()
+    data_fmt   = ts.strftime('%d/%m/%Y')
+    hora       = ts.strftime('%H:%M')
+    ontem_fmt  = ontem.strftime('%d/%m')
+    hoje_fmt2  = hoje.strftime('%d/%m')
+
+    df10   = fetch(inicio_10d, hoje_s)
     df_mes = fetch(mes_s, hoje_s)
-    if df_on.empty:
+
+    if df10.empty:
         return {"mensagem": f"_Resumo indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
-    k_on  = kpis(df_on)
-    k_mes = kpis(df_mes) if not df_mes.empty else k_on
-    e_on  = emoji_circle(k_on['sla'])
-    e_mes = emoji_circle(k_mes['sla'])
-    av    = ' _(parcial)_' if df_mes.empty else ''
+
+    sem1h = df10[~df10['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h['StatusOp']  = _apply_status_map(sem1h['Status'])
+    sem1h['DataSLA_d'] = pd.to_datetime(sem1h['DataSLA_Sistema'], errors='coerce').dt.date
+
+    # --- Ontem: pedidos com prazo = ontem ---
+    on_df       = sem1h[sem1h['DataSLA_d'] == ontem]
+    on_total    = len(on_df)
+    on_ok       = int((on_df['Status_SLA'] == 'No Prazo').sum())
+    on_atr_ent  = int((on_df['Status_SLA'] == 'Atrasado').sum())
+    on_nao_ent  = int((on_df['Status_SLA'] == 'Pendente').sum())  # nao entregues = viraram ATR
+    on_sla      = on_ok / (on_ok + on_atr_ent) * 100 if (on_ok + on_atr_ent) > 0 else 0
+    e_on        = emoji_circle(on_sla) if (on_ok + on_atr_ent) > 0 else '⚪'
+
+    # --- Hoje: pedidos com prazo = hoje ---
+    hj_df       = sem1h[sem1h['DataSLA_d'] == hoje]
+    hj_total    = len(hj_df)
+    hj_entregues = int((hj_df['Status_SLA'] != 'Pendente').sum())
+    hj_pend     = hj_df[hj_df['Status_SLA'] == 'Pendente']
+    hj_n_pend   = len(hj_pend)
+    hj_transito  = int((hj_pend['StatusOp'] == 'Em Transito').sum())
+    hj_expedindo = int((hj_pend['StatusOp'] == 'Expedindo').sum())
+    hj_insucesso = int((hj_pend['StatusOp'] == 'Insucesso').sum())
+    hj_outros    = hj_n_pend - hj_transito - hj_expedindo - hj_insucesso
+
+    # --- Mes ---
+    k_mes = kpis(df_mes) if not df_mes.empty else None
+    e_mes = emoji_circle(k_mes['sla']) if k_mes else '⚪'
+    if k_mes:
+        mes_linha = f"• SLA: {e_mes} *{k_mes['sla']:.1f}%* | ATR acumulado: {k_mes['atrasados']}"
+    else:
+        mes_linha = "• _Dados do mes indisponiveis_"
+
+    outros_linha = f"• Outros: {hj_outros}\n" if hj_outros > 0 else ""
+
     msg = (
         f"\U0001f305 *RESUMO AGV -- {data_fmt} | {hora}*\n"
         f"━━━━━━━━━━━━━\n"
-        f"\U0001f4e6 *Ontem ({ontem})*\n"
-        f"• Pedidos D+: {k_on['sem1h']}\n"
-        f"• Entregues: {k_on['entregues']}\n"
-        f"• No Prazo: {k_on['ok']} | ATR: {k_on['atrasados']}\n"
-        f"• SLA: {e_on} *{k_on['sla']:.1f}%*\n"
+        f"\U0001f4cb *Vencimentos de ontem ({ontem_fmt})*\n"
+        f"• {on_total} pedidos com prazo no dia\n"
+        f"• ✅ {on_ok} entregues no prazo {e_on} {on_sla:.0f}%\n"
+        f"• ❌ {on_nao_ent} nao entregues → viraram ATR\n"
         f"\n"
-        f"\U0001f4c5 *Acumulado do mes{av}*\n"
-        f"• Total D+: {k_mes['sem1h']}\n"
-        f"• SLA mes: {e_mes} *{k_mes['sla']:.1f}%*\n"
-        f"• ATR mes: {k_mes['atrasados']}\n"
+        f"\U0001f6a8 *Urgente hoje ({hoje_fmt2}) -- {hj_n_pend} pendentes*\n"
+        f"• {hj_total} pedidos vencem hoje | {hj_entregues} ja entregues\n"
+        f"• \U0001f69a {hj_transito} em transito\n"
+        f"• \U0001f4ec {hj_expedindo} expedindo (risco alto)\n"
+        f"• \U0001f504 {hj_insucesso} insucesso (retentativa urgente)\n"
+        f"{outros_linha}"
         f"\n"
-        f"\U0001f3e2 *SLA por Polo (ontem)*\n"
-        f"{fmt_polo_resumo(k_on['polos'])}\n"
+        f"\U0001f4c5 *Mes acumulado*\n"
+        f"{mes_linha}\n"
         f"━━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
