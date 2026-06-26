@@ -1,20 +1,12 @@
 """
 AGV Logistica -- API de Reports de SLA  (v11)
 FastAPI que o n8n chama para gerar os reports do WhatsApp.
-
-ENDPOINTS:
-    GET /resumo      -> Report das 07h
-    GET /painel      -> Operacional a cada 3h (08,11,14,17,20)
-    GET /fechamento  -> Report das 18h
-    GET /health      -> Healthcheck
 """
 from fastapi import FastAPI
 from datetime import datetime, timedelta, date
 import unicodedata, ast, requests, pandas as pd, holidays
 
 app = FastAPI(title="AGV SLA API")
-
-# ─── CONFIGURACAO ─────────────────────────────────────────────────
 
 API_URL   = "https://api-servicos.octalog.com.br/consulta/pedidos"
 API_TOKEN = "MTEx26QUdWOjIwMjYtMDYtMjE6UGVkaWRvcy1CSQ=="
@@ -25,13 +17,9 @@ CIDADES_D2_NORM = {
         'indaiatuba','guaruja','sao vicente','cubatao'
     ]
 }
-
 FERIADOS        = holidays.Brazil(state='SP', years=range(2025, 2028))
 FERIADOS_EXTRAS = { date(2026, 6, 4) }
 CEP_SP_MIN, CEP_SP_MAX = 1000000, 9999999
-
-
-# ─── UTILITARIOS ──────────────────────────────────────────────────
 
 def sem_acento(s):
     return ''.join(
@@ -72,17 +60,22 @@ def to_date_br(v):
 def now_brt():
     return pd.Timestamp.now('America/Sao_Paulo')
 
-
-# ─── FETCH ────────────────────────────────────────────────────────
-
 def fetch(data_inicio: str, data_fim: str) -> pd.DataFrame:
-    r = requests.get(
-        API_URL,
-        headers={"token": API_TOKEN},
-        params={"DataInicio": data_inicio, "DataFinal": data_fim},
-        timeout=120
-    )
-    r.raise_for_status()
+    try:
+        r = requests.get(
+            API_URL,
+            headers={"token": API_TOKEN},
+            params={"DataInicio": data_inicio, "DataFinal": data_fim},
+            timeout=120
+        )
+        r.raise_for_status()
+    except requests.exceptions.Timeout:
+        print(f"[TIMEOUT] fetch({data_inicio}, {data_fim})")
+        return pd.DataFrame()
+    except requests.exceptions.RequestException as e:
+        print(f"[ERRO] fetch({data_inicio}, {data_fim}) -- {e}")
+        return pd.DataFrame()
+
     raw = r.json()
     pedidos = raw if isinstance(raw, list) else next(
         (raw.get(k) for k in ('pedidos','data','result') if raw.get(k)),
@@ -118,23 +111,19 @@ def fetch(data_inicio: str, data_fim: str) -> pd.DataFrame:
         cidade = sem_acento(row.get('CidadeDestino','') or '')
         cep    = str(row.get('CEP','') or '').replace('-','').replace('.','').strip()
         integ  = row.get('DataIntegracao')
-
         if '1H' in s or '1H' in p:
             if pd.notna(integ):
                 return (pd.to_datetime(integ,utc=True)+timedelta(hours=1)).date(),'1Hr'
             return None,'1Hr'
         if pd.isna(integ) or str(integ)=='': return None,'SEM_DATA'
-
         dt = pd.to_datetime(integ,utc=True).tz_convert('America/Sao_Paulo').replace(tzinfo=None)
         d0 = prox_util(dt.date()) if dt.hour < 8 else prox_util(dt.date()+timedelta(days=1))
-
         if cidade in CIDADES_D2_NORM:
             dias,tipo = 2,'D+2 (cidade)'
         else:
             try: cep_n = int(cep[:8].ljust(8,'0')) if cep else 0
             except: cep_n = 0
             dias,tipo = 1,('D+1 (Grande SP)' if CEP_SP_MIN<=cep_n<=CEP_SP_MAX else 'D+1 (padrao)')
-
         return add_uteis(d0,dias), tipo
 
     res = df.apply(calc, axis=1)
@@ -161,9 +150,6 @@ def fetch(data_inicio: str, data_fim: str) -> pd.DataFrame:
     df['Diff_SLA_dias'] = df.apply(diff, axis=1)
     return df
 
-
-# ─── KPIs ─────────────────────────────────────────────────────────
-
 def kpis(df: pd.DataFrame) -> dict:
     sem1h = df[~df['Tipo_SLA'].str.contains('1Hr', na=False)]
     ent   = sem1h[sem1h['Status_SLA'] != 'Pendente']
@@ -172,8 +158,6 @@ def kpis(df: pd.DataFrame) -> dict:
     at = n - ok
     pend = int((sem1h['Status_SLA']=='Pendente').sum())
     sla  = ok/n*100 if n else 0
-
-    # Por polo: ok (no prazo), atr (entregues atrasados), pen (pendentes)
     polos = {}
     if 'Polo' in sem1h.columns:
         for polo, g in sem1h[sem1h['Polo'].str.strip().ne('')].groupby('Polo'):
@@ -189,55 +173,31 @@ def kpis(df: pd.DataFrame) -> dict:
                 'ok': oe, 'atr': atr_n, 'pen': pen_n,
                 'sla': oe/ne*100
             }
-
     return {
         'total': len(df), 'sem1h': len(sem1h), 'entregues': n,
         'ok': ok, 'atrasados': at, 'pendentes': pend, 'sla': sla,
         'polos': polos,
     }
 
-
-# ─── STATUS MAP ───────────────────────────────────────────────────
-
 STATUS_MAP = {
-    'Entrega Realizada':                    'Entregue',
-    'Chegada no Destinatario':              'Entregue',
-    'Coletado na Loja':                     'Entregue',
-    'Despachado':                           'Em Transito',
-    'Chegada na Base':                      'Em Transito',
-    'Transferencia entre unidades':         'Em Transito',
-    'Rota de Entrega':                      'Em Transito',
-    'Integracao Recebida':                  'Expedindo',
-    'Nao Coletado':                         'Expedindo',
-    'Coleta Cancelado pelo Remetente':      'Cancelado',
-    'Entrega Cancelada pelo Remetente':     'Cancelado',
-    'Cancelado pelo Destinatario':          'Cancelado',
-    'Cliente Ausente':                      'Insucesso',
-    'Localidade Nao Atendida':              'Insucesso',
-    'Endereco Nao Localizado':              'Insucesso',
-    'Numero nao Localizado':                'Insucesso',
-    'Estabelecimento Fechado':              'Insucesso',
-    'Destinatario Nao Encontrado':          'Insucesso',
-    'Recusado por Terceiro':                'Insucesso',
-    'Outras Ocorrencias':                   'Insucesso',
-    'Em Devolucao':                         'Devolucao',
-    'Devolvido':                            'Devolucao',
-    'Pedido Extraviado':                    'Problema',
-    'Pedido Danificado':                    'Problema',
-    'Aguardando Tratativa':                 'Problema',
-    # Com acentos
-    'Acareacao: Entrega Realizada':         'Entregue',
-    'Cancelado pelo Destinatario':          'Cancelado',
-    'Localidade Nao Atendida':              'Insucesso',
-    'Endereco Nao Localizado':              'Insucesso',
-    'Numero nao Localizado':                'Insucesso',
-    'Destinatario Nao Encontrado':          'Insucesso',
-    'Outras Ocorrencias':                   'Insucesso',
-    'Em Devolucao':                         'Devolucao',
+    'Entrega Realizada': 'Entregue', 'Chegada no Destinatario': 'Entregue',
+    'Coletado na Loja': 'Entregue', 'Acareacao: Entrega Realizada': 'Entregue',
+    'Despachado': 'Em Transito', 'Chegada na Base': 'Em Transito',
+    'Transferencia entre unidades': 'Em Transito', 'Rota de Entrega': 'Em Transito',
+    'Integracao Recebida': 'Expedindo', 'Nao Coletado': 'Expedindo',
+    'Coleta Cancelado pelo Remetente': 'Cancelado',
+    'Entrega Cancelada pelo Remetente': 'Cancelado',
+    'Cancelado pelo Destinatario': 'Cancelado',
+    'Cliente Ausente': 'Insucesso', 'Localidade Nao Atendida': 'Insucesso',
+    'Endereco Nao Localizado': 'Insucesso', 'Numero nao Localizado': 'Insucesso',
+    'Estabelecimento Fechado': 'Insucesso', 'Destinatario Nao Encontrado': 'Insucesso',
+    'Recusado por Terceiro': 'Insucesso', 'Outras Ocorrencias': 'Insucesso',
+    'Em Devolucao': 'Devolucao', 'Devolvido': 'Devolucao',
+    'Pedido Extraviado': 'Problema', 'Pedido Danificado': 'Problema',
+    'Aguardando Tratativa': 'Problema',
 }
 
 def _apply_status_map(series):
-    """Aplica STATUS_MAP e tenta sem acento como fallback."""
     result = series.map(STATUS_MAP)
     mask   = result.isna()
     if mask.any():
@@ -249,14 +209,10 @@ def _apply_status_map(series):
         )
     return result.fillna('Outros')
 
-
-# ─── STATUS OPERACIONAL ───────────────────────────────────────────
-
 def status_operacional(df: pd.DataFrame) -> dict:
     sem1h = df[~df['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
     sem1h['StatusOp'] = _apply_status_map(sem1h['Status'])
     c = sem1h['StatusOp'].value_counts().to_dict()
-
     lojas_criticas = []
     if 'LojaNome' in sem1h.columns:
         for loja, g in sem1h[sem1h['LojaNome'].str.strip().ne('')].groupby('LojaNome'):
@@ -264,8 +220,6 @@ def status_operacional(df: pd.DataFrame) -> dict:
             if t >= 20 and ins/t > 0.10:
                 lojas_criticas.append({'loja':loja,'total':t,'insucesso':int(ins),'pct':ins/t*100})
     lojas_criticas.sort(key=lambda x: -x['pct'])
-
-    # Por grupo/contratante: ok / atr (entregues atrasados) / pen (pendentes)
     grupos = {}
     if 'LojaGrupo' in sem1h.columns:
         for grp, g in sem1h[sem1h['LojaGrupo'].str.strip().ne('')].groupby('LojaGrupo'):
@@ -281,19 +235,14 @@ def status_operacional(df: pd.DataFrame) -> dict:
                 'entregue': ent, 'insucesso': ins,
                 'pct_ent': sla, 'pct_ins': ins/total*100
             }
-
     return {'contagens': c, 'lojas_criticas': lojas_criticas, 'grupos': grupos}
 
-
-# ─── FORMATACAO ───────────────────────────────────────────────────
-
 def emoji_circle(pct):
-    if pct >= 95: return '🟢'
-    if pct >= 88: return '🟡'
-    return '🔴'
+    if pct >= 95: return '\U0001f7e2'
+    if pct >= 88: return '\U0001f7e1'
+    return '\U0001f534'
 
 def fmt_polo(polos: dict, top=7) -> str:
-    """83% | 2781 ped = 1867 Ok / 329 ATR / 585 PEN"""
     if not polos: return '_Sem dados de polo_'
     ordenados = sorted(polos.items(), key=lambda x: x[1]['total'], reverse=True)[:top]
     linhas = []
@@ -306,7 +255,6 @@ def fmt_polo(polos: dict, top=7) -> str:
     return '\n'.join(linhas)
 
 def fmt_polo_resumo(polos: dict, top=5) -> str:
-    """Para /resumo: sla% | ok / total ped"""
     if not polos: return '_Sem dados de polo_'
     ordenados = sorted(polos.items(), key=lambda x: x[1]['entregues'], reverse=True)[:top]
     linhas = []
@@ -316,7 +264,6 @@ def fmt_polo_resumo(polos: dict, top=5) -> str:
     return '\n'.join(linhas)
 
 def fmt_status_grupos(grupos: dict) -> str:
-    """83% | 4399 ped = 3646 Ok / 753 ATR / X PEN"""
     if not grupos: return '_Sem dados_'
     linhas = []
     for grp, d in sorted(grupos.items(), key=lambda x: -x[1]['total']):
@@ -335,13 +282,9 @@ def fmt_lojas_criticas(lojas) -> str:
         linhas.append(f"  {l['loja'][:28]}: {l['pct']:.0f}% ({l['insucesso']}/{l['total']})")
     return '\n'.join(linhas)
 
-
-# ─── ENDPOINTS ────────────────────────────────────────────────────
-
 @app.get("/health")
 def health():
     return {"status": "ok", "hora": now_brt().strftime('%d/%m/%Y %H:%M')}
-
 
 @app.get("/resumo")
 def resumo():
@@ -352,38 +295,34 @@ def resumo():
     ts       = now_brt()
     data_fmt = ts.strftime('%d/%m/%Y')
     hora     = ts.strftime('%H:%M')
-
     df_on  = fetch(ontem, ontem)
     df_mes = fetch(mes_s, hoje_s)
     if df_on.empty:
-        return {"mensagem": f"Sem dados para {ontem}"}
-
+        return {"mensagem": f"_Resumo indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
     k_on  = kpis(df_on)
     k_mes = kpis(df_mes) if not df_mes.empty else k_on
-
     e_on  = emoji_circle(k_on['sla'])
     e_mes = emoji_circle(k_mes['sla'])
-
+    av    = ' _(parcial)_' if df_mes.empty else ''
     msg = (
-        f"🌅 *RESUMO AGV -- {data_fmt} | {hora}*\n"
+        f"\U0001f305 *RESUMO AGV -- {data_fmt} | {hora}*\n"
         f"━━━━━━━━━━━━━\n"
-        f"📦 *Ontem ({ontem})*\n"
+        f"\U0001f4e6 *Ontem ({ontem})*\n"
         f"• Pedidos D+: {k_on['sem1h']}\n"
         f"• Entregues: {k_on['entregues']}\n"
         f"• No Prazo: {k_on['ok']} | ATR: {k_on['atrasados']}\n"
         f"• SLA: {e_on} *{k_on['sla']:.1f}%*\n"
         f"\n"
-        f"📅 *Acumulado do mes*\n"
+        f"\U0001f4c5 *Acumulado do mes{av}*\n"
         f"• Total D+: {k_mes['sem1h']}\n"
         f"• SLA mes: {e_mes} *{k_mes['sla']:.1f}%*\n"
         f"• ATR mes: {k_mes['atrasados']}\n"
         f"\n"
-        f"🏢 *SLA por Polo (ontem)*\n"
+        f"\U0001f3e2 *SLA por Polo (ontem)*\n"
         f"{fmt_polo_resumo(k_on['polos'])}\n"
         f"━━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
-
 
 @app.get("/painel")
 def painel():
@@ -394,11 +333,9 @@ def painel():
     ts         = now_brt()
     hoje_fmt   = hoje.strftime('%d/%m/%Y')
     hora       = ts.strftime('%H:%M')
-
     df10 = fetch(inicio_10d, hoje_s)
     if df10.empty:
-        return {"mensagem": f"Sem dados ({hoje_s})"}
-
+        return {"mensagem": f"_Painel indisponivel ({hoje_fmt} | {hora}) -- API sem resposta_"}
     sem1h_10 = df10[~df10['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
     sem1h_10['StatusOp'] = _apply_status_map(sem1h_10['Status'])
     sem1h_10['DataInteg_d'] = (
@@ -407,61 +344,50 @@ def painel():
     )
     hoje_df = sem1h_10[sem1h_10['DataInteg_d'] == hoje]
     c = hoje_df['StatusOp'].value_counts().to_dict()
-
-    df_mes = pd.DataFrame()
-    try:
-        df_mes = fetch(mes_s, hoje_s)
-    except Exception:
-        try:
-            df_mes = fetch((hoje - timedelta(days=20)).strftime('%Y-%m-%d'), hoje_s)
-        except Exception:
-            df_mes = df10
-
+    df_mes = fetch(mes_s, hoje_s)
+    fallback = df_mes.empty
+    if fallback:
+        df_mes = df10
+    av = ' _(ultimos 10d)_' if fallback else ''
     sem1h_mes = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
     sem1h_mes['StatusOp']  = _apply_status_map(sem1h_mes['Status'])
     sem1h_mes['DataSLA_d'] = pd.to_datetime(sem1h_mes['DataSLA_Sistema'], errors='coerce').dt.date
-
-    # Vencidos = abertos (nao entregues) com SLA ja expirado
     abertos_mes  = sem1h_mes[~sem1h_mes['StatusOp'].isin(['Entregue','Cancelado','Devolucao'])].copy()
     vencidos_mes = abertos_mes[abertos_mes['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
     n_vencidos   = len(vencidos_mes)
-
     linhas_cont = []
     if not vencidos_mes.empty:
         col = 'LojaGrupo' if 'LojaGrupo' in vencidos_mes.columns else 'LojaNome'
         for nome, cnt in vencidos_mes[col].value_counts().items():
             if not nome or str(nome).strip() == '': continue
             nome_c = str(nome).replace('GRUPO ','').replace(' DROGASIL','').title()[:30]
-            linhas_cont.append(f"  🔴 {nome_c}: {cnt} vencidos")
+            linhas_cont.append(f"  \U0001f534 {nome_c}: {cnt} vencidos")
     cont_fmt = '\n'.join(linhas_cont) if linhas_cont else '  Nenhum vencido'
-
     linhas_polo = []
     if not vencidos_mes.empty and 'Polo' in vencidos_mes.columns:
         for polo, cnt in vencidos_mes[vencidos_mes['Polo'].str.strip().ne('')]['Polo'].value_counts().items():
-            linhas_polo.append(f"  🔴 {polo}: {cnt} vencidos")
+            linhas_polo.append(f"  \U0001f534 {polo}: {cnt} vencidos")
     polo_fmt = '\n'.join(linhas_polo) if linhas_polo else '  Nenhum vencido'
-
     msg = (
         f"⚙️ *PAINEL -- {hoje_fmt} | {hora}*\n"
         f"━━━━━━━━━━━━\n"
-        f"📋 *Status operacional (dia)*\n"
+        f"\U0001f4cb *Status operacional (dia)*\n"
         f"• ✅ Entregues: {c.get('Entregue', 0)}\n"
-        f"• 🚚 Em Transito: {c.get('Em Transito', 0)}\n"
-        f"• 📬 Expedindo: {c.get('Expedindo', 0)}\n"
-        f"• 🔄 Insucesso: {c.get('Insucesso', 0)}\n"
+        f"• \U0001f69a Em Transito: {c.get('Em Transito', 0)}\n"
+        f"• \U0001f4ec Expedindo: {c.get('Expedindo', 0)}\n"
+        f"• \U0001f504 Insucesso: {c.get('Insucesso', 0)}\n"
         f"• ↩️ Devolucao: {c.get('Devolucao', 0)}\n"
         f"• ❌ Cancelado: {c.get('Cancelado', 0)}\n"
         f"• ⌛ Vencidos: {n_vencidos}\n"
         f"\n"
-        f"📋 *Por Contratante (vencidos -- mes)*\n"
+        f"\U0001f4cb *Por Contratante (vencidos -- mes{av})*\n"
         f"{cont_fmt}\n"
         f"\n"
-        f"🏢 *Por Polo (vencidos -- mes)*\n"
+        f"\U0001f3e2 *Por Polo (vencidos -- mes{av})*\n"
         f"{polo_fmt}\n"
         f"━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
-
 
 @app.get("/fechamento")
 def fechamento():
@@ -471,61 +397,54 @@ def fechamento():
     ts       = now_brt()
     data_fmt = ts.strftime('%d/%m/%Y')
     hora     = ts.strftime('%H:%M')
-
     df_hj  = fetch(hoje_s, hoje_s)
     df_mes = fetch(mes_s, hoje_s)
     if df_hj.empty:
-        return {"mensagem": f"Sem dados para fechamento de {hoje_s}"}
-
+        return {"mensagem": f"_Fechamento indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
     k_hj  = kpis(df_hj)
     k_mes = kpis(df_mes) if not df_mes.empty else k_hj
-
+    av    = ' _(parcial)_' if df_mes.empty else ''
     st = status_operacional(df_mes) if not df_mes.empty else {}
     c  = st.get('contagens', {})
     lojas_alert = fmt_lojas_criticas(st.get('lojas_criticas', []))
     grupos_fmt  = fmt_status_grupos(st.get('grupos', {}))
     polos_fmt   = fmt_polo(k_mes['polos'], top=7)
-
     e_hj  = emoji_circle(k_hj['sla'])
     e_mes = emoji_circle(k_mes['sla'])
     lojas_section = ('\n' + lojas_alert) if lojas_alert else ''
-
     msg = (
-        f"🌆 *FECHAMENTO AGV -- {data_fmt} | {hora}*\n"
+        f"\U0001f306 *FECHAMENTO AGV -- {data_fmt} | {hora}*\n"
         f"━━━━━━━━━━━\n"
-        f"📦 *Dia de hoje*\n"
+        f"\U0001f4e6 *Dia de hoje*\n"
         f"• Integrados: {k_hj['total']} | D+: {k_hj['sem1h']}\n"
         f"• Entregues: {k_hj['entregues']} | Pendentes: {k_hj['pendentes']}\n"
         f"• ATR: {k_hj['atrasados']}\n"
         f"• SLA do dia: {e_hj} *{k_hj['sla']:.1f}%*\n"
         f"\n"
-        f"📅 *Acumulado do mes*\n"
+        f"\U0001f4c5 *Acumulado do mes{av}*\n"
         f"• Total D+: {k_mes['sem1h']}\n"
         f"• Entregues: {k_mes['entregues']}\n"
         f"• SLA mes: {e_mes} *{k_mes['sla']:.1f}%*\n"
         f"• ATR: {k_mes['atrasados']}\n"
         f"\n"
-        f"📋 *Status operacional (mes)*\n"
+        f"\U0001f4cb *Status operacional (mes{av})*\n"
         f"• ✅ Entregues: {c.get('Entregue', 0)}\n"
-        f"• 🚚 Em Transito: {c.get('Em Transito', 0)}\n"
-        f"• 📬 Expedindo: {c.get('Expedindo', 0)}\n"
-        f"• 🔄 Insucesso: {c.get('Insucesso', 0)}\n"
+        f"• \U0001f69a Em Transito: {c.get('Em Transito', 0)}\n"
+        f"• \U0001f4ec Expedindo: {c.get('Expedindo', 0)}\n"
+        f"• \U0001f504 Insucesso: {c.get('Insucesso', 0)}\n"
         f"• ↩️ Devolucao: {c.get('Devolucao', 0)}\n"
         f"• ❌ Cancelado: {c.get('Cancelado', 0)}\n"
         f"• ⌛ Vencidos: {k_mes['pendentes']}\n"
         f"\n"
-        f"🏢 *Polos SLA mes*\n"
+        f"\U0001f3e2 *Polos SLA mes{av}*\n"
         f"{polos_fmt}\n"
         f"\n"
-        f"📊 *Por Contratante (mes)*\n"
+        f"\U0001f4ca *Por Contratante (mes{av})*\n"
         f"{grupos_fmt}"
         f"{lojas_section}\n"
         f"━━━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
-
-
-# ─── START ────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import uvicorn
