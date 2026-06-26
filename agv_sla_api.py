@@ -1,6 +1,11 @@
 """
 AGV Logistica -- API de Reports de SLA  (v13)
 FastAPI que o n8n chama para gerar os reports do WhatsApp.
+
+Mudancas v13:
+- fetch_chunked(): divide janelas grandes em chunks de 3 dias para evitar timeout
+- Painel usa fetch_chunked para df10 (10 dias) -- resolve "Painel indisponivel"
+- Status operacional agora mostra abertos_mes (todos em aberto), nao so hoje
 """
 from fastapi import FastAPI
 from datetime import datetime, timedelta, date
@@ -149,6 +154,20 @@ def fetch(data_inicio: str, data_fim: str) -> pd.DataFrame:
 
     df['Diff_SLA_dias'] = df.apply(diff, axis=1)
     return df
+
+def fetch_chunked(data_inicio: str, data_fim: str, chunk_days: int = 3) -> pd.DataFrame:
+    """Divide janelas grandes em chunks menores para evitar timeout da API."""
+    start  = date.fromisoformat(data_inicio)
+    end    = date.fromisoformat(data_fim)
+    frames = []
+    cur    = start
+    while cur <= end:
+        chunk_end = min(cur + timedelta(days=chunk_days - 1), end)
+        df = fetch(cur.strftime('%Y-%m-%d'), chunk_end.strftime('%Y-%m-%d'))
+        if not df.empty:
+            frames.append(df)
+        cur = chunk_end + timedelta(days=1)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 def kpis(df: pd.DataFrame) -> dict:
     sem1h = df[~df['Tipo_SLA'].str.contains('1Hr', na=False)]
@@ -333,25 +352,32 @@ def painel():
     ts         = now_brt()
     hoje_fmt   = hoje.strftime('%d/%m/%Y')
     hora       = ts.strftime('%H:%M')
-    df10 = fetch(inicio_10d, hoje_s)
+
+    # fetch_chunked garante que 10 dias nao va dar timeout (4 chamadas de 3 dias)
+    df10 = fetch_chunked(inicio_10d, hoje_s, chunk_days=3)
     if df10.empty:
         return {"mensagem": f"_Painel indisponivel ({hoje_fmt} | {hora}) -- API sem resposta_"}
-    sem1h_10 = df10[~df10['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
-    sem1h_10['StatusOp'] = _apply_status_map(sem1h_10['Status'])
-    df_mes = fetch(mes_s, hoje_s)
+
+    # tenta mes completo; se timeout, usa df10 como fallback
+    df_mes   = fetch(mes_s, hoje_s)
     fallback = df_mes.empty
     if fallback:
         df_mes = df10
     av = ' _(ultimos 10d)_' if fallback else ''
+
     sem1h_mes = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
     sem1h_mes['StatusOp']  = _apply_status_map(sem1h_mes['Status'])
     sem1h_mes['DataSLA_d'] = pd.to_datetime(sem1h_mes['DataSLA_Sistema'], errors='coerce').dt.date
+
+    # abertos = todos que nao foram entregues/cancelados/devolucao
     abertos_mes  = sem1h_mes[~sem1h_mes['StatusOp'].isin(['Entregue','Cancelado','Devolucao'])].copy()
     vencidos_mes = abertos_mes[abertos_mes['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
-    # status dos pedidos em aberto (nao entregues) -- base real para o painel
-    c            = abertos_mes['StatusOp'].value_counts().to_dict()
-    n_entregues  = int((sem1h_mes['StatusOp'] == 'Entregue').sum())
     n_vencidos   = len(vencidos_mes)
+
+    # status real: conta os abertos (nao apenas os de hoje)
+    c           = abertos_mes['StatusOp'].value_counts().to_dict()
+    n_entregues = int((sem1h_mes['StatusOp'] == 'Entregue').sum())
+
     linhas_cont = []
     if not vencidos_mes.empty:
         col = 'LojaGrupo' if 'LojaGrupo' in vencidos_mes.columns else 'LojaNome'
@@ -360,11 +386,13 @@ def painel():
             nome_c = str(nome).replace('GRUPO ','').replace(' DROGASIL','').title()[:30]
             linhas_cont.append(f"  \U0001f534 {nome_c}: {cnt} vencidos")
     cont_fmt = '\n'.join(linhas_cont) if linhas_cont else '  Nenhum vencido'
+
     linhas_polo = []
     if not vencidos_mes.empty and 'Polo' in vencidos_mes.columns:
         for polo, cnt in vencidos_mes[vencidos_mes['Polo'].str.strip().ne('')]['Polo'].value_counts().items():
             linhas_polo.append(f"  \U0001f534 {polo}: {cnt} vencidos")
     polo_fmt = '\n'.join(linhas_polo) if linhas_polo else '  Nenhum vencido'
+
     msg = (
         f"⚙️ *PAINEL -- {hoje_fmt} | {hora}*\n"
         f"━━━━━━━━━━━━\n"
@@ -374,12 +402,12 @@ def painel():
         f"• \U0001f4ec Expedindo: {c.get('Expedindo', 0)}\n"
         f"• \U0001f504 Insucesso: {c.get('Insucesso', 0)}\n"
         f"• ↩️ Devolucao: {c.get('Devolucao', 0)}\n"
-        f"• ⌛ Vencidos (SLA vencido): {n_vencidos}\n"
+        f"• ⏳ Vencidos (SLA vencido): {n_vencidos}\n"
         f"\n"
-        f"\U0001f4cb *Por Contratante (vencidos -- mes{av})*\n"
+        f"\U0001f4cb *Por Contratante (vencidos{av})*\n"
         f"{cont_fmt}\n"
         f"\n"
-        f"\U0001f3e2 *Por Polo (vencidos -- mes{av})*\n"
+        f"\U0001f3e2 *Por Polo (vencidos{av})*\n"
         f"{polo_fmt}\n"
         f"━━━━━━━━━━━━"
     )
@@ -430,7 +458,7 @@ def fechamento():
         f"• \U0001f504 Insucesso: {c.get('Insucesso', 0)}\n"
         f"• ↩️ Devolucao: {c.get('Devolucao', 0)}\n"
         f"• ❌ Cancelado: {c.get('Cancelado', 0)}\n"
-        f"• ⌛ Vencidos: {k_mes['pendentes']}\n"
+        f"• ⏳ Vencidos: {k_mes['pendentes']}\n"
         f"\n"
         f"\U0001f3e2 *Polos SLA mes{av}*\n"
         f"{polos_fmt}\n"
