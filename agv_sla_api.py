@@ -506,6 +506,92 @@ def fechamento():
     )
     return {"mensagem": msg.strip()}
 
+@app.get("/cliente")
+def cliente(nome: str = "raia"):
+    """Raio-x de um contratante. Ex: /cliente?nome=raia"""
+    hoje  = date.today()
+    mes_s = hoje.replace(day=1).strftime('%Y-%m-%d')
+    hoje_s = hoje.strftime('%Y-%m-%d')
+    ts     = now_brt()
+    data_fmt = ts.strftime('%d/%m/%Y')
+    hora     = ts.strftime('%H:%M')
+
+    df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=3)
+    if df_mes.empty:
+        return {"mensagem": f"_Raio-x indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
+
+    sem1h = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h['StatusOp']  = _apply_status_map(sem1h['Status'])
+    sem1h['DataSLA_d'] = pd.to_datetime(sem1h['DataSLA_Sistema'], errors='coerce').dt.date
+
+    # filtra pelo nome do contratante (LojaGrupo ou LojaNome)
+    nome_norm = sem_acento(nome)
+    col_busca = 'LojaGrupo' if 'LojaGrupo' in sem1h.columns else 'LojaNome'
+    mask = sem1h[col_busca].apply(lambda x: nome_norm in sem_acento(str(x)))
+    df_c = sem1h[mask].copy()
+
+    if df_c.empty:
+        grupos_disp = sem1h[col_busca].value_counts().head(10).index.tolist()
+        return {"mensagem": f"_Contratante '{nome}' nao encontrado. Disponiveis: {grupos_disp}_"}
+
+    nome_exib = df_c[col_busca].mode()[0] if not df_c[col_busca].empty else nome.title()
+    total     = len(df_c)
+    entregues = int((df_c['Status_SLA'] != 'Pendente').sum())
+    no_prazo  = int((df_c['Status_SLA'] == 'No Prazo').sum())
+    atrasados = int((df_c['Status_SLA'] == 'Atrasado').sum())
+    pendentes = int((df_c['Status_SLA'] == 'Pendente').sum())
+    sla       = no_prazo / entregues * 100 if entregues else 0
+
+    # vencidos: abertos com SLA ja vencido
+    abertos   = df_c[~df_c['StatusOp'].isin(['Entregue','Cancelado','Devolucao'])]
+    vencidos  = abertos[abertos['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
+    n_venc    = len(vencidos)
+
+    # breakdown dos vencidos por StatusOp
+    vc = vencidos['StatusOp'].value_counts().to_dict() if n_venc else {}
+
+    # por polo
+    polo_lines = []
+    if 'Polo' in df_c.columns:
+        for polo, g in df_c[df_c['Polo'].str.strip().ne('')].groupby('Polo'):
+            t  = len(g)
+            ent_g = g[g['Status_SLA'] != 'Pendente']
+            ok_g  = int((ent_g['Status_SLA'] == 'No Prazo').sum())
+            ne_g  = len(ent_g)
+            sla_g = ok_g / ne_g * 100 if ne_g else 0
+            venc_g = len(g[~g['StatusOp'].isin(['Entregue','Cancelado','Devolucao']) &
+                           g['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)])
+            e = emoji_circle(sla_g)
+            polo_lines.append((t, f"{e} *{polo}*: {sla_g:.0f}% | {t} ped = {ok_g} Ok / {ne_g-ok_g} ATR / {t-ne_g} PEN | {venc_g} vencidos"))
+    polo_lines.sort(key=lambda x: -x[0])
+    polo_fmt = '\n'.join(l for _, l in polo_lines) if polo_lines else '_Sem dados de polo_'
+
+    e_sla = emoji_circle(sla)
+    venc_detail = (
+        f"  \U0001f69a Em Transito: {vc.get('Em Transito',0)}\n"
+        f"  \U0001f4ec Expedindo: {vc.get('Expedindo',0)}\n"
+        f"  \U0001f504 Insucesso: {vc.get('Insucesso',0)}"
+    ) if n_venc else "  Nenhum vencido"
+
+    nome_titulo = str(nome_exib).replace('GRUPO ','').replace(' DROGASIL','').title()
+    msg = (
+        f"\U0001f50d *RAIO-X: {nome_titulo} -- {data_fmt} | {hora}*\n"
+        f"━━━━━━━━━━━━━\n"
+        f"\U0001f4e6 *Volume do mes*\n"
+        f"• Total D+: {total}\n"
+        f"• Entregues: {entregues} | Pendentes: {pendentes}\n"
+        f"• No Prazo: {no_prazo} | ATR: {atrasados}\n"
+        f"• SLA: {e_sla} *{sla:.1f}%*\n"
+        f"\n"
+        f"⏳ *Vencidos em aberto: {n_venc}*\n"
+        f"{venc_detail}\n"
+        f"\n"
+        f"\U0001f3e2 *Por Polo*\n"
+        f"{polo_fmt}\n"
+        f"━━━━━━━━━━━━━"
+    )
+    return {"mensagem": msg.strip()}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
