@@ -526,6 +526,77 @@ def raio_x():
     )
     return {"mensagem": msg.strip()}
 
+@app.get("/insucesso")
+def insucesso():
+    """Raio-x de insucessos da operacao: por cliente, polo e tipo de ocorrencia."""
+    hoje  = date.today()
+    mes_s = hoje.replace(day=1).strftime('%Y-%m-%d')
+    hoje_s = hoje.strftime('%Y-%m-%d')
+    ts = now_brt(); data_fmt = ts.strftime('%d/%m/%Y'); hora = ts.strftime('%H:%M')
+
+    df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=3)
+    if df_mes.empty:
+        return {"mensagem": f"_Insucesso indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
+
+    sem1h = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h['StatusOp'] = _apply_status_map(sem1h['Status'])
+
+    # filtra so os insucessos
+    ins = sem1h[sem1h['StatusOp'] == 'Insucesso'].copy()
+    total_ins = len(ins)
+    total_ped = len(sem1h)
+    pct_total = total_ins / total_ped * 100 if total_ped else 0
+
+    if total_ins == 0:
+        return {"mensagem": f"_Nenhum insucesso no periodo ({data_fmt})_"}
+
+    # por tipo de ocorrencia (campo Status original)
+    tipo_lines = []
+    if 'Status' in ins.columns:
+        for tipo, cnt in ins['Status'].value_counts().head(6).items():
+            pct = cnt / total_ins * 100
+            tipo_lines.append(f"  • {str(tipo)[:35]}: {cnt} ({pct:.0f}%)")
+    tipo_fmt = '\n'.join(tipo_lines) if tipo_lines else '  _Sem dados_'
+
+    # por polo
+    polo_lines = []
+    if 'Polo' in ins.columns:
+        polo_total = sem1h[sem1h['Polo'].str.strip().ne('')].groupby('Polo').size()
+        for polo, cnt in ins[ins['Polo'].str.strip().ne('')]['Polo'].value_counts().head(8).items():
+            tot_polo = polo_total.get(polo, 1)
+            pct_polo = cnt / tot_polo * 100
+            polo_lines.append(f"  \U0001f534 *{polo}*: {cnt} ins ({pct_polo:.0f}% do polo)")
+    polo_fmt = '\n'.join(polo_lines) if polo_lines else '  _Sem dados_'
+
+    # por cliente (top 6)
+    cli_lines = []
+    col_c = 'LojaGrupo' if 'LojaGrupo' in ins.columns else 'LojaNome'
+    cli_total = sem1h[sem1h[col_c].str.strip().ne('')].groupby(col_c).size()
+    for nome_c, cnt in ins[ins[col_c].str.strip().ne('')][col_c].value_counts().head(6).items():
+        nome_fmt = str(nome_c).replace('GRUPO ','').replace(' DROGASIL','').title()[:28]
+        tot_cli = cli_total.get(nome_c, 1)
+        pct_cli = cnt / tot_cli * 100
+        cli_lines.append(f"  \U0001f534 *{nome_fmt}*: {cnt} ins ({pct_cli:.0f}% dos pedidos)")
+    cli_fmt = '\n'.join(cli_lines) if cli_lines else '  _Sem dados_'
+
+    msg = (
+        f"\U0001f504 *INSUCESSO AGV -- {data_fmt} | {hora}*\n"
+        f"━━━━━━━━━━━━━\n"
+        f"• Total insucessos no mes: *{total_ins}*\n"
+        f"• Representa *{pct_total:.1f}%* de todos os pedidos D+\n"
+        f"\n"
+        f"\U0001f4cb *Por tipo de ocorrencia*\n"
+        f"{tipo_fmt}\n"
+        f"\n"
+        f"\U0001f3e2 *Por Polo*\n"
+        f"{polo_fmt}\n"
+        f"\n"
+        f"\U0001f4ca *Por Cliente (top 6)*\n"
+        f"{cli_fmt}\n"
+        f"━━━━━━━━━━━━━"
+    )
+    return {"mensagem": msg.strip()}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
