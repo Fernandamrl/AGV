@@ -307,38 +307,74 @@ def health():
 
 @app.get("/resumo")
 def resumo():
-    hoje   = date.today()
-    ontem  = (hoje - timedelta(days=1)).strftime('%Y-%m-%d')
-    mes_s  = hoje.replace(day=1).strftime('%Y-%m-%d')
-    hoje_s = hoje.strftime('%Y-%m-%d')
-    ts       = now_brt()
-    data_fmt = ts.strftime('%d/%m/%Y')
-    hora     = ts.strftime('%H:%M')
-    df_on  = fetch(ontem, ontem)
-    df_mes = fetch(mes_s, hoje_s)
-    if df_on.empty:
+    hoje       = date.today()
+    ontem      = hoje - timedelta(days=1)
+    inicio_10d = (hoje - timedelta(days=10)).strftime('%Y-%m-%d')
+    mes_s      = hoje.replace(day=1).strftime('%Y-%m-%d')
+    hoje_s     = hoje.strftime('%Y-%m-%d')
+    ts         = now_brt()
+    data_fmt   = ts.strftime('%d/%m/%Y')
+    hora       = ts.strftime('%H:%M')
+    ontem_fmt  = ontem.strftime('%d/%m')
+    hoje_fmt_r = hoje.strftime('%d/%m')
+
+    # fetch_chunked cobre 10 dias -- inclui pedidos D+1 e D+2 dos dias anteriores
+    df10 = fetch_chunked(inicio_10d, hoje_s, chunk_days=3)
+    if df10.empty:
         return {"mensagem": f"_Resumo indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
-    k_on  = kpis(df_on)
-    k_mes = kpis(df_mes) if not df_mes.empty else k_on
-    e_on  = emoji_circle(k_on['sla'])
-    e_mes = emoji_circle(k_mes['sla'])
-    av    = ' _(parcial)_' if df_mes.empty else ''
+
+    sem1h = df10[~df10['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h['StatusOp']  = _apply_status_map(sem1h['Status'])
+    sem1h['DataSLA_d'] = pd.to_datetime(sem1h['DataSLA_Sistema'], errors='coerce').dt.date
+
+    # Ontem: pedidos cujo PRAZO (DataSLA) era ontem
+    on_df      = sem1h[sem1h['DataSLA_d'] == ontem]
+    on_ok      = int((on_df['Status_SLA'] == 'No Prazo').sum())
+    on_atr_ent = int((on_df['Status_SLA'] == 'Atrasado').sum())
+    on_nao_ent = int((on_df['Status_SLA'] == 'Pendente').sum())
+    on_total   = len(on_df)
+    on_sla     = on_ok / (on_ok + on_atr_ent) * 100 if (on_ok + on_atr_ent) > 0 else 0
+
+    # Hoje: pedidos cujo PRAZO e hoje, breakdown dos pendentes por StatusOp
+    hj_df        = sem1h[sem1h['DataSLA_d'] == hoje]
+    hj_total     = len(hj_df)
+    hj_ok        = int((hj_df['Status_SLA'] == 'No Prazo').sum())
+    hj_atr       = int((hj_df['Status_SLA'] == 'Atrasado').sum())
+    hj_pend_df   = hj_df[hj_df['Status_SLA'] == 'Pendente']
+    hj_pend      = len(hj_pend_df)
+    hj_transito  = int((hj_pend_df['StatusOp'] == 'Em Transito').sum())
+    hj_expedindo = int((hj_pend_df['StatusOp'] == 'Expedindo').sum())
+    hj_insucesso = int((hj_pend_df['StatusOp'] == 'Insucesso').sum())
+
+    # Mes acumulado (tenta fetch unico; fallback ja tratado acima via df10)
+    df_mes  = fetch(mes_s, hoje_s)
+    av      = ' _(parcial)_' if df_mes.empty else ''
+    k_mes   = kpis(df_mes) if not df_mes.empty else {}
+    e_mes   = emoji_circle(k_mes['sla']) if k_mes else '\U0001f534'
+    mes_line = (
+        f"• SLA: {e_mes} *{k_mes['sla']:.1f}%* | ATR acumulado: {k_mes['atrasados']}"
+        if k_mes else "• _Dados do mes indisponiveis_"
+    )
+
+    e_on         = emoji_circle(on_sla)
+    nao_ent_line = f"• ❌ {on_nao_ent} nao entregues -- viraram ATR\n" if on_nao_ent > 0 else ""
+
     msg = (
         f"\U0001f305 *RESUMO AGV -- {data_fmt} | {hora}*\n"
         f"━━━━━━━━━━━━━\n"
-        f"\U0001f4e6 *Ontem ({ontem})*\n"
-        f"• Pedidos D+: {k_on['sem1h']}\n"
-        f"• Entregues: {k_on['entregues']}\n"
-        f"• No Prazo: {k_on['ok']} | ATR: {k_on['atrasados']}\n"
-        f"• SLA: {e_on} *{k_on['sla']:.1f}%*\n"
+        f"\U0001f4cb *Vencimentos de ontem ({ontem_fmt})*\n"
+        f"• {on_total} pedidos com prazo no dia\n"
+        f"• {e_on} {on_ok} entregues no prazo ({on_sla:.0f}%) | {on_atr_ent} ATR\n"
+        f"{nao_ent_line}"
         f"\n"
-        f"\U0001f4c5 *Acumulado do mes{av}*\n"
-        f"• Total D+: {k_mes['sem1h']}\n"
-        f"• SLA mes: {e_mes} *{k_mes['sla']:.1f}%*\n"
-        f"• ATR mes: {k_mes['atrasados']}\n"
+        f"\U0001f6a8 *Urgente hoje ({hoje_fmt_r}) -- {hj_pend} pendentes*\n"
+        f"• {hj_total} pedidos vencem hoje | {hj_ok + hj_atr} ja entregues\n"
+        f"• \U0001f69a {hj_transito} em transito\n"
+        f"• \U0001f4ec {hj_expedindo} expedindo (risco alto)\n"
+        f"• \U0001f504 {hj_insucesso} insucesso (retentativa urgente)\n"
         f"\n"
-        f"\U0001f3e2 *SLA por Polo (ontem)*\n"
-        f"{fmt_polo_resumo(k_on['polos'])}\n"
+        f"\U0001f4c5 *Mes acumulado{av}*\n"
+        f"{mes_line}\n"
         f"━━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
