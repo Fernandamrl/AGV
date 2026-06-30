@@ -355,17 +355,19 @@ def fechamento():
     hoje  = date.today()
     hoje_s = hoje.strftime('%Y-%m-%d'); mes_s = hoje.replace(day=1).strftime('%Y-%m-%d')
     ts = now_brt(); data_fmt = ts.strftime('%d/%m/%Y'); hora = ts.strftime('%H:%M')
-    df_hj  = fetch(hoje_s, hoje_s)
+    # Uma única chamada cobre o mês inteiro (inclui hoje); filtra para kpis do dia
     df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=3)
-    if df_hj.empty:
+    if df_mes.empty:
         return {"mensagem": f"_Fechamento indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
-    k_hj = kpis(df_hj); k_mes = kpis(df_mes) if not df_mes.empty else k_hj
+    df_hj = df_mes[pd.to_datetime(df_mes['DataIntegracao'], utc=True, errors='coerce')
+                   .dt.tz_convert('America/Sao_Paulo').dt.date == hoje] if 'DataIntegracao' in df_mes.columns else df_mes.iloc[0:0]
+    k_hj = kpis(df_hj) if not df_hj.empty else {'total':0,'sem1h':0,'entregues':0,'ok':0,'atrasados':0,'pendentes':0,'sla':0,'polos':{}}
+    k_mes = kpis(df_mes)
     st = status_operacional(df_mes) if not df_mes.empty else {}
     c = st.get('contagens', {}); lojas_alert = fmt_lojas_criticas(st.get('lojas_criticas', []))
     grupos_fmt = fmt_status_grupos(st.get('grupos', {})); polos_fmt = fmt_polo(k_mes['polos'], top=7)
     e_hj = emoji_circle(k_hj['sla']); e_mes = emoji_circle(k_mes['sla'])
     lojas_section = ('\n' + lojas_alert) if lojas_alert else ''
-    av = ' _(parcial)_' if df_mes.empty else ''
     msg = (
         f"\U0001f306 *FECHAMENTO AGV -- {data_fmt} | {hora}*\n"
         f"━━━━━━━━━━━\n"
@@ -375,13 +377,13 @@ def fechamento():
         f"• ATR: {k_hj['atrasados']}\n"
         f"• SLA do dia: {e_hj} *{k_hj['sla']:.1f}%*\n"
         f"\n"
-        f"\U0001f4c5 *Acumulado do mes{av}*\n"
+        f"\U0001f4c5 *Acumulado do mes*\n"
         f"• Total D+: {k_mes['sem1h']}\n"
         f"• Entregues: {k_mes['entregues']}\n"
         f"• SLA mes: {e_mes} *{k_mes['sla']:.1f}%*\n"
         f"• ATR: {k_mes['atrasados']}\n"
         f"\n"
-        f"\U0001f4cb *Status operacional (mes{av})*\n"
+        f"\U0001f4cb *Status operacional (mes)*\n"
         f"• ✅ Entregues: {c.get('Entregue', 0)}\n"
         f"• \U0001f69a Em Transito: {c.get('Em Transito', 0)}\n"
         f"• \U0001f4ec Expedindo: {c.get('Expedindo', 0)}\n"
@@ -390,10 +392,10 @@ def fechamento():
         f"• ❌ Cancelado: {c.get('Cancelado', 0)}\n"
         f"• ⏳ Vencidos: {k_mes['pendentes']}\n"
         f"\n"
-        f"\U0001f3e2 *Polos SLA mes{av}*\n"
+        f"\U0001f3e2 *Polos SLA mes*\n"
         f"{polos_fmt}\n"
         f"\n"
-        f"\U0001f4ca *Por Contratante (mes{av})*\n"
+        f"\U0001f4ca *Por Contratante (mes)*\n"
         f"{grupos_fmt}"
         f"{lojas_section}\n"
         f"━━━━━━━━━━━━━━"
