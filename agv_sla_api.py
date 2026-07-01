@@ -552,6 +552,48 @@ def insucesso():
     )
     return {"mensagem": msg.strip()}
 
+@app.get("/transportadoras")
+def transportadoras():
+    hoje  = date.today()
+    mes_s = hoje.replace(day=1).strftime('%Y-%m-%d'); hoje_s = hoje.strftime('%Y-%m-%d')
+    ts = now_brt(); data_fmt = ts.strftime('%d/%m/%Y'); hora = ts.strftime('%H:%M')
+    df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=3)
+    if df_mes.empty:
+        return {"mensagem": f"_Transportadoras indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
+    TRANS_MAP = {11: 'AGV', 14: 'TPL'}
+    col_id   = 'IDTransportadora' if 'IDTransportadora' in df_mes.columns else None
+    col_nome = 'Transportadora'   if 'Transportadora'   in df_mes.columns else None
+    sem1h = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    linhas = []
+    total = len(sem1h)
+    if col_id:
+        for tid, g in sem1h.groupby(col_id):
+            nome = TRANS_MAP.get(int(tid) if str(tid).isdigit() else tid,
+                                 str(g[col_nome].iloc[0]) if col_nome else str(tid))
+            ent = g[g['Status_SLA'] != 'Pendente']; ok = int((ent['Status_SLA'] == 'No Prazo').sum())
+            atr = len(ent) - ok; pend = len(g) - len(ent)
+            sla = ok / len(ent) * 100 if len(ent) else 0
+            pct_total = len(g) / total * 100 if total else 0
+            linhas.append(f"{emoji_circle(sla)} *{nome}* (ID {tid}): {len(g)} ped ({pct_total:.0f}%) | SLA {sla:.0f}% | {ok} Ok / {atr} ATR / {pend} PEN")
+    elif col_nome:
+        for nome, g in sem1h.groupby(col_nome):
+            ent = g[g['Status_SLA'] != 'Pendente']; ok = int((ent['Status_SLA'] == 'No Prazo').sum())
+            atr = len(ent) - ok; pend = len(g) - len(ent)
+            sla = ok / len(ent) * 100 if len(ent) else 0
+            pct_total = len(g) / total * 100 if total else 0
+            linhas.append(f"{emoji_circle(sla)} *{nome}*: {len(g)} ped ({pct_total:.0f}%) | SLA {sla:.0f}% | {ok} Ok / {atr} ATR / {pend} PEN")
+    else:
+        return {"mensagem": "_Campo Transportadora nao encontrado na API_"}
+    corpo = '\n'.join(linhas) if linhas else '_Sem dados_'
+    msg = (
+        f"\U0001f69a *TRANSPORTADORAS -- {data_fmt} | {hora}*\n"
+        f"━━━━━━━━━━━━━\n"
+        f"• Total D+ no mes: {total}\n\n"
+        f"{corpo}\n"
+        f"━━━━━━━━━━━━━"
+    )
+    return {"mensagem": msg.strip()}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
