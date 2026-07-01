@@ -651,6 +651,95 @@ def transportadoras():
     )
     return {"mensagem": msg.strip()}
 
+@app.get("/raio-x-trans")
+def raio_x_trans(nome: str = "TPL"):
+    hoje  = date.today()
+    mes_s = hoje.replace(day=1).strftime('%Y-%m-%d'); hoje_s = hoje.strftime('%Y-%m-%d')
+    ts = now_brt(); data_fmt = ts.strftime('%d/%m/%Y'); hora = ts.strftime('%H:%M')
+    df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=3)
+    if df_mes.empty:
+        return {"mensagem": f"_Raio-x trans indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
+    sem1h = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h['StatusOp']  = _apply_status_map(sem1h['Status'])
+    sem1h['DataSLA_d'] = pd.to_datetime(sem1h['DataSLA_Sistema'], errors='coerce').dt.date
+    # filtra por nome ou ID da transportadora
+    nome_up = nome.strip().upper()
+    if 'IDTransportadora' in sem1h.columns:
+        id_alvo = next((k for k, v in TRANS_MAP.items() if v.upper() == nome_up), None)
+        if id_alvo is not None:
+            try: mask = sem1h['IDTransportadora'].apply(lambda x: int(x) == id_alvo)
+            except: mask = pd.Series([False]*len(sem1h))
+        else:
+            col_t = 'Transportadora' if 'Transportadora' in sem1h.columns else 'IDTransportadora'
+            mask  = sem1h[col_t].apply(lambda x: nome_up in str(x).upper())
+    elif 'Transportadora' in sem1h.columns:
+        mask = sem1h['Transportadora'].apply(lambda x: nome_up in str(x).upper())
+    else:
+        return {"mensagem": "_Campo de transportadora nao encontrado nos dados_"}
+    df_t = sem1h[mask].copy()
+    if df_t.empty:
+        return {"mensagem": f"_Transportadora '{nome}' nao encontrada nos dados do mes_"}
+    nome_exib = TRANS_MAP.get(id_alvo, nome.upper()) if 'id_alvo' in dir() and id_alvo else nome.upper()
+    total    = len(df_t)
+    entregues = int((df_t['Status_SLA'] != 'Pendente').sum())
+    no_prazo  = int((df_t['Status_SLA'] == 'No Prazo').sum())
+    atr       = int((df_t['Status_SLA'] == 'Atrasado').sum())
+    pend      = int((df_t['Status_SLA'] == 'Pendente').sum())
+    sla       = no_prazo / entregues * 100 if entregues else 0
+    n_ins     = int((df_t['StatusOp'] == 'Insucesso').sum())
+    abertos  = df_t[~df_t['StatusOp'].isin(['Entregue','Cancelado','Devolucao'])]
+    vencidos = abertos[abertos['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
+    n_venc   = len(vencidos); vc = vencidos['StatusOp'].value_counts().to_dict() if n_venc else {}
+    # por polo
+    polo_lines = []
+    if 'Polo' in df_t.columns:
+        for polo, g in df_t[df_t['Polo'].str.strip().ne('')].groupby('Polo'):
+            t = len(g); ent_g = g[g['Status_SLA'] != 'Pendente']
+            ok_g = int((ent_g['Status_SLA'] == 'No Prazo').sum()); ne_g = len(ent_g)
+            sla_g = ok_g / ne_g * 100 if ne_g else 0
+            vg = len(g[~g['StatusOp'].isin(['Entregue','Cancelado','Devolucao']) & g['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)])
+            polo_lines.append((t, f"{emoji_circle(sla_g)} *{polo}*: {sla_g:.0f}% | {t} ped = {ok_g} Ok / {ne_g-ok_g} ATR / {t-ne_g} PEN | {vg} vencidos"))
+    polo_lines.sort(key=lambda x: -x[0])
+    polo_fmt = '\n'.join(l for _, l in polo_lines) if polo_lines else '_Sem dados_'
+    # top 5 contratantes (normalizados)
+    col_c = 'LojaGrupo' if 'LojaGrupo' in df_t.columns else 'LojaNome'
+    cli_lines = []
+    if not df_t.empty:
+        df_t['_norm'] = df_t[col_c].apply(normalizar_contratante)
+        for nm, g in df_t.groupby('_norm'):
+            if not nm or str(nm).strip() == '': continue
+            t = len(g); ent_g = g[g['Status_SLA'] != 'Pendente']
+            ok_g = int((ent_g['Status_SLA'] == 'No Prazo').sum()); ne_g = len(ent_g)
+            sla_g = ok_g / ne_g * 100 if ne_g else 0
+            cli_lines.append((t, f"{emoji_circle(sla_g)} *{nm}*: {t} ped | SLA {sla_g:.0f}% | {ok_g} Ok / {ne_g-ok_g} ATR / {t-ne_g} PEN"))
+    cli_lines.sort(key=lambda x: -x[0])
+    cli_fmt = '\n'.join(l for _, l in cli_lines[:5]) if cli_lines else '_Sem dados_'
+    venc_detail = (
+        f"  \U0001f69a Em Transito: {vc.get('Em Transito',0)}\n"
+        f"  \U0001f4ec Expedindo: {vc.get('Expedindo',0)}\n"
+        f"  ⚠️ Problema: {vc.get('Problema',0)}"
+    ) if n_venc else "  Nenhum vencido"
+    msg = (
+        f"\U0001f50d *RAIO-X: {nome_exib} -- {data_fmt} | {hora}*\n"
+        f"━━━━━━━━━━━━━\n"
+        f"\U0001f4e6 *Volume do mes*\n"
+        f"• Total D+: {total}\n"
+        f"• Entregues: {entregues} | Pendentes: {pend}\n"
+        f"• No Prazo: {no_prazo} | ATR: {atr} | Insucesso: {n_ins}\n"
+        f"• SLA: {emoji_circle(sla)} *{sla:.1f}%*\n"
+        f"\n"
+        f"⏳ *Vencidos em aberto: {n_venc}*\n"
+        f"{venc_detail}\n"
+        f"\n"
+        f"\U0001f4cb *Por Contratante (top 5)*\n"
+        f"{cli_fmt}\n"
+        f"\n"
+        f"\U0001f3e2 *Por Polo*\n"
+        f"{polo_fmt}\n"
+        f"━━━━━━━━━━━━━"
+    )
+    return {"mensagem": msg.strip()}
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
