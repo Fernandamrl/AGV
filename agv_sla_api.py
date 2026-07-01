@@ -389,7 +389,8 @@ def fechamento(mes: str = None):
         hoje_s  = hoje.strftime('%Y-%m-%d')
         historico = False
         titulo  = hoje.strftime('%m/%Y')
-    df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=3)
+    # historico usa chunks maiores (dados fixos, menos chamadas = mais rapido)
+    df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=7 if historico else 3)
     if df_mes.empty:
         return {"mensagem": f"_Fechamento indisponivel ({titulo} | {hora}) -- API sem resposta_"}
     if not historico:
