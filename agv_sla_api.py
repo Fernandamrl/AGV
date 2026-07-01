@@ -4,12 +4,12 @@ v13: fetch_chunked em TODOS os fetches do mes -- sem fallback, sempre mes comple
 """
 from fastapi import FastAPI
 from datetime import datetime, timedelta, date
-import unicodedata, ast, requests, pandas as pd, holidays
+import unicodedata, ast, requests, pandas as pd, holidays, os
 
 app = FastAPI(title="AGV SLA API")
 
 API_URL   = "https://api-servicos.octalog.com.br/consulta/pedidos"
-API_TOKEN = "MTEx2tMTQ6QUdWOjIwMjYtMDYtMjE6UGVkaWRvcy1CSQ=="
+API_TOKEN = os.environ.get("API_TOKEN", "")
 CIDADES_D2_NORM = {'santos','sao jose dos campos','praia grande','indaiatuba','guaruja','sao vicente','cubatao'}
 FERIADOS        = holidays.Brazil(state='SP', years=range(2025, 2028))
 FERIADOS_EXTRAS = {date(2026, 6, 4)}
