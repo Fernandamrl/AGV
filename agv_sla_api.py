@@ -332,6 +332,21 @@ def painel():
         for polo, cnt in vencidos[vencidos['Polo'].str.strip().ne('')]['Polo'].value_counts().items():
             linhas_polo.append(f"  \U0001f534 {polo}: {cnt} vencidos")
     polo_fmt = '\n'.join(linhas_polo) if linhas_polo else '  Nenhum vencido'
+    TRANS_MAP = {11: 'AGV', 14: 'TPL'}
+    linhas_trans = []
+    col_tid = 'IDTransportadora' if 'IDTransportadora' in sem1h.columns else None
+    col_tnome = 'Transportadora' if 'Transportadora' in sem1h.columns else None
+    if col_tid:
+        for tid, g in sem1h.groupby(col_tid):
+            tnome = TRANS_MAP.get(int(tid) if str(tid).isdigit() else tid,
+                                  str(g[col_tnome].iloc[0]) if col_tnome else str(tid))
+            ent = g[g['Status_SLA'] != 'Pendente']
+            ok = int((ent['Status_SLA'] == 'No Prazo').sum())
+            atr = len(ent) - ok; pend = len(g) - len(ent)
+            sla = ok / len(ent) * 100 if len(ent) else 0
+            pct = len(g) / len(sem1h) * 100 if len(sem1h) else 0
+            linhas_trans.append(f"{emoji_circle(sla)} *{tnome}*: {len(g)} ped ({pct:.0f}%) | SLA {sla:.0f}% | {ok} Ok / {atr} ATR / {pend} PEN")
+    trans_fmt = '\n'.join(linhas_trans) if linhas_trans else '  _Sem dados_'
     msg = (
         f"⚙️ *PAINEL -- {hoje_fmt} | {hora}*\n"
         f"━━━━━━━━━━━━\n"
@@ -342,6 +357,9 @@ def painel():
         f"• \U0001f504 Insucesso: {c.get('Insucesso', 0)}\n"
         f"• ↩️ Devolucao: {c.get('Devolucao', 0)}\n"
         f"• ⏳ Vencidos (SLA vencido): {n_venc}\n"
+        f"\n"
+        f"\U0001f69a *Por Transportadora (mes)*\n"
+        f"{trans_fmt}\n"
         f"\n"
         f"\U0001f4cb *Por Contratante (vencidos)*\n"
         f"{cont_fmt}\n"
