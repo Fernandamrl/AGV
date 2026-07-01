@@ -9,7 +9,7 @@ import unicodedata, ast, requests, pandas as pd, holidays, os
 app = FastAPI(title="AGV SLA API")
 
 API_URL   = "https://api-servicos.octalog.com.br/consulta/pedidos"
-API_TOKEN = os.environ.get("API_TOKEN", "")
+API_TOKEN = os.environ.get("API_TOKEN", "MTEx26QUdWOjIwMjYtMDYtMjE6UGVkaWRvcy1CSQ==")
 CIDADES_D2_NORM = {'santos','sao jose dos campos','praia grande','indaiatuba','guaruja','sao vicente','cubatao'}
 FERIADOS        = holidays.Brazil(state='SP', years=range(2025, 2028))
 FERIADOS_EXTRAS = {date(2026, 6, 4)}
@@ -247,7 +247,9 @@ def gerar_narrativa(sla, total, ok, atr, pend, vencidos, v_ins, v_trans, v_exp, 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "hora": now_brt().strftime('%d/%m/%Y %H:%M')}
+    tok = API_TOKEN
+    return {"status": "ok", "hora": now_brt().strftime('%d/%m/%Y %H:%M'),
+            "token_set": bool(tok), "token_preview": tok[:8] + "..." if tok else "VAZIO"}
 
 @app.get("/resumo")
 def resumo():
