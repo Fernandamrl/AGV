@@ -1,15 +1,18 @@
 """
 AGV Logistica -- API de Reports de SLA  (v13)
 v13: fetch_chunked em TODOS os fetches do mes -- sem fallback, sempre mes completo
+     fechamento com parametro ?mes=YYYY-MM para historico
+     painel com breakdown por transportadora
 """
 from fastapi import FastAPI
 from datetime import datetime, timedelta, date
-import unicodedata, ast, requests, pandas as pd, holidays, os
+import unicodedata, ast, requests, pandas as pd, holidays, os, calendar
 
 app = FastAPI(title="AGV SLA API")
 
 API_URL   = "https://api-servicos.octalog.com.br/consulta/pedidos"
 API_TOKEN = os.environ.get("API_TOKEN", "MTEx2tMTQ6QUdWOjIwMjYtMDYtMjE6UGVkaWRvcy1CSQ==")
+TRANS_MAP = {11: 'AGV', 14: 'TPL'}
 CIDADES_D2_NORM = {'santos','sao jose dos campos','praia grande','indaiatuba','guaruja','sao vicente','cubatao'}
 FERIADOS        = holidays.Brazil(state='SP', years=range(2025, 2028))
 FERIADOS_EXTRAS = {date(2026, 6, 4)}
@@ -119,7 +122,6 @@ def fetch(data_inicio: str, data_fim: str) -> pd.DataFrame:
     return df
 
 def fetch_chunked(data_inicio: str, data_fim: str, chunk_days: int = 3) -> pd.DataFrame:
-    """Divide o periodo em janelas menores para evitar timeout da API."""
     start = date.fromisoformat(data_inicio); end = date.fromisoformat(data_fim)
     frames = []; cur = start
     while cur <= end:
@@ -199,14 +201,6 @@ def fmt_polo(polos: dict, top=7) -> str:
         linhas.append(f"{e} *{nome}*: {d['sla']:.0f}% | {d['total']} ped = {d['ok']} Ok / {d['atr']} ATR / {d['pen']} PEN")
     return '\n'.join(linhas)
 
-def fmt_polo_resumo(polos: dict, top=5) -> str:
-    if not polos: return '_Sem dados de polo_'
-    linhas = []
-    for nome, d in sorted(polos.items(), key=lambda x: x[1]['entregues'], reverse=True)[:top]:
-        e = emoji_circle(d['sla'])
-        linhas.append(f"{e} *{nome}*: {d['sla']:.0f}% | {d['ok']} ok / {d['total']} ped")
-    return '\n'.join(linhas)
-
 def fmt_status_grupos(grupos: dict) -> str:
     if not grupos: return '_Sem dados_'
     linhas = []
@@ -222,6 +216,26 @@ def fmt_lojas_criticas(lojas) -> str:
     for l in lojas[:5]:
         linhas.append(f"  {l['loja'][:28]}: {l['pct']:.0f}% ({l['insucesso']}/{l['total']})")
     return '\n'.join(linhas)
+
+def fmt_transportadora(sem1h: pd.DataFrame) -> str:
+    col_tid = 'IDTransportadora' if 'IDTransportadora' in sem1h.columns else None
+    col_tnome = 'Transportadora' if 'Transportadora' in sem1h.columns else None
+    if not col_tid and not col_tnome: return '_Sem dados_'
+    linhas = []; total = len(sem1h)
+    groupby_col = col_tid if col_tid else col_tnome
+    for tid, g in sem1h.groupby(groupby_col):
+        if col_tid:
+            try: tnome = TRANS_MAP.get(int(tid), str(g[col_tnome].iloc[0]) if col_tnome else str(tid))
+            except: tnome = str(tid)
+        else:
+            tnome = str(tid)
+        ent = g[g['Status_SLA'] != 'Pendente']
+        ok = int((ent['Status_SLA'] == 'No Prazo').sum())
+        atr = len(ent) - ok; pend = len(g) - len(ent)
+        sla = ok / len(ent) * 100 if len(ent) else 0
+        pct = len(g) / total * 100 if total else 0
+        linhas.append(f"{emoji_circle(sla)} *{tnome}*: {len(g)} ped ({pct:.0f}%) | SLA {sla:.0f}% | {ok} Ok / {atr} ATR / {pend} PEN")
+    return '\n'.join(linhas) if linhas else '_Sem dados_'
 
 def gerar_narrativa(sla, total, ok, atr, pend, vencidos, v_ins, v_trans, v_exp, polo_pior, polo_pior_sla, polo_ref, polo_ref_sla, cliente_top, cliente_top_venc) -> str:
     if sla >= 95: nivel = "dentro da meta"
@@ -308,7 +322,6 @@ def painel():
     hoje  = date.today()
     mes_s = hoje.replace(day=1).strftime('%Y-%m-%d'); hoje_s = hoje.strftime('%Y-%m-%d')
     ts = now_brt(); hoje_fmt = hoje.strftime('%d/%m/%Y'); hora = ts.strftime('%H:%M')
-    # fetch_chunked garante mes completo sem timeout
     df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=3)
     if df_mes.empty:
         return {"mensagem": f"_Painel indisponivel ({hoje_fmt} | {hora}) -- API sem resposta_"}
@@ -332,21 +345,7 @@ def painel():
         for polo, cnt in vencidos[vencidos['Polo'].str.strip().ne('')]['Polo'].value_counts().items():
             linhas_polo.append(f"  \U0001f534 {polo}: {cnt} vencidos")
     polo_fmt = '\n'.join(linhas_polo) if linhas_polo else '  Nenhum vencido'
-    TRANS_MAP = {11: 'AGV', 14: 'TPL'}
-    linhas_trans = []
-    col_tid = 'IDTransportadora' if 'IDTransportadora' in sem1h.columns else None
-    col_tnome = 'Transportadora' if 'Transportadora' in sem1h.columns else None
-    if col_tid:
-        for tid, g in sem1h.groupby(col_tid):
-            tnome = TRANS_MAP.get(int(tid) if str(tid).isdigit() else tid,
-                                  str(g[col_tnome].iloc[0]) if col_tnome else str(tid))
-            ent = g[g['Status_SLA'] != 'Pendente']
-            ok = int((ent['Status_SLA'] == 'No Prazo').sum())
-            atr = len(ent) - ok; pend = len(g) - len(ent)
-            sla = ok / len(ent) * 100 if len(ent) else 0
-            pct = len(g) / len(sem1h) * 100 if len(sem1h) else 0
-            linhas_trans.append(f"{emoji_circle(sla)} *{tnome}*: {len(g)} ped ({pct:.0f}%) | SLA {sla:.0f}% | {ok} Ok / {atr} ATR / {pend} PEN")
-    trans_fmt = '\n'.join(linhas_trans) if linhas_trans else '  _Sem dados_'
+    trans_fmt = fmt_transportadora(sem1h)
     msg = (
         f"⚙️ *PAINEL -- {hoje_fmt} | {hora}*\n"
         f"━━━━━━━━━━━━\n"
@@ -371,39 +370,58 @@ def painel():
     return {"mensagem": msg.strip()}
 
 @app.get("/fechamento")
-def fechamento():
+def fechamento(mes: str = None):
+    """mes = 'YYYY-MM' para fechamento historico. Ex: /fechamento?mes=2026-06"""
     hoje  = date.today()
-    hoje_s = hoje.strftime('%Y-%m-%d'); mes_s = hoje.replace(day=1).strftime('%Y-%m-%d')
-    ts = now_brt(); data_fmt = ts.strftime('%d/%m/%Y'); hora = ts.strftime('%H:%M')
-    # Uma única chamada cobre o mês inteiro (inclui hoje); filtra para kpis do dia
+    ts = now_brt(); hora = ts.strftime('%H:%M')
+    if mes:
+        try:
+            ano, m = int(mes.split('-')[0]), int(mes.split('-')[1])
+            mes_s   = f"{ano:04d}-{m:02d}-01"
+            ultimo  = calendar.monthrange(ano, m)[1]
+            hoje_s  = f"{ano:04d}-{m:02d}-{ultimo:02d}"
+            historico = True
+            titulo  = f"{m:02d}/{ano}"
+        except:
+            return {"mensagem": "_Formato invalido. Use mes=YYYY-MM (ex: 2026-06)_"}
+    else:
+        mes_s   = hoje.replace(day=1).strftime('%Y-%m-%d')
+        hoje_s  = hoje.strftime('%Y-%m-%d')
+        historico = False
+        titulo  = hoje.strftime('%m/%Y')
     df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=3)
     if df_mes.empty:
-        return {"mensagem": f"_Fechamento indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
-    df_hj = df_mes[pd.to_datetime(df_mes['DataIntegracao'], utc=True, errors='coerce')
-                   .dt.tz_convert('America/Sao_Paulo').dt.date == hoje] if 'DataIntegracao' in df_mes.columns else df_mes.iloc[0:0]
-    k_hj = kpis(df_hj) if not df_hj.empty else {'total':0,'sem1h':0,'entregues':0,'ok':0,'atrasados':0,'pendentes':0,'sla':0,'polos':{}}
+        return {"mensagem": f"_Fechamento indisponivel ({titulo} | {hora}) -- API sem resposta_"}
+    if not historico:
+        df_hj = df_mes[pd.to_datetime(df_mes['DataIntegracao'], utc=True, errors='coerce')
+                       .dt.tz_convert('America/Sao_Paulo').dt.date == hoje] if 'DataIntegracao' in df_mes.columns else df_mes.iloc[0:0]
+        k_hj = kpis(df_hj) if not df_hj.empty else {'total':0,'sem1h':0,'entregues':0,'ok':0,'atrasados':0,'pendentes':0,'sla':0,'polos':{}}
+    else:
+        k_hj = {'total':0,'sem1h':0,'entregues':0,'ok':0,'atrasados':0,'pendentes':0,'sla':0,'polos':{}}
     k_mes = kpis(df_mes)
-    st = status_operacional(df_mes) if not df_mes.empty else {}
+    st = status_operacional(df_mes)
     c = st.get('contagens', {}); lojas_alert = fmt_lojas_criticas(st.get('lojas_criticas', []))
     grupos_fmt = fmt_status_grupos(st.get('grupos', {})); polos_fmt = fmt_polo(k_mes['polos'], top=7)
     e_hj = emoji_circle(k_hj['sla']); e_mes = emoji_circle(k_mes['sla'])
     lojas_section = ('\n' + lojas_alert) if lojas_alert else ''
-    msg = (
-        f"\U0001f306 *FECHAMENTO AGV -- {data_fmt} | {hora}*\n"
-        f"━━━━━━━━━━━\n"
+    hoje_section = (
         f"\U0001f4e6 *Dia de hoje*\n"
         f"• Integrados: {k_hj['total']} | D+: {k_hj['sem1h']}\n"
         f"• Entregues: {k_hj['entregues']} | Pendentes: {k_hj['pendentes']}\n"
         f"• ATR: {k_hj['atrasados']}\n"
-        f"• SLA do dia: {e_hj} *{k_hj['sla']:.1f}%*\n"
-        f"\n"
-        f"\U0001f4c5 *Acumulado do mes*\n"
+        f"• SLA do dia: {e_hj} *{k_hj['sla']:.1f}%*\n\n"
+    ) if not historico else ""
+    msg = (
+        f"\U0001f306 *FECHAMENTO AGV -- {titulo} | {hora}*\n"
+        f"━━━━━━━━━━━\n"
+        f"{hoje_section}"
+        f"\U0001f4c5 *{'Fechamento do mes' if historico else 'Acumulado do mes'} ({titulo})*\n"
         f"• Total D+: {k_mes['sem1h']}\n"
         f"• Entregues: {k_mes['entregues']}\n"
         f"• SLA mes: {e_mes} *{k_mes['sla']:.1f}%*\n"
         f"• ATR: {k_mes['atrasados']}\n"
         f"\n"
-        f"\U0001f4cb *Status operacional (mes)*\n"
+        f"\U0001f4cb *Status operacional*\n"
         f"• ✅ Entregues: {c.get('Entregue', 0)}\n"
         f"• \U0001f69a Em Transito: {c.get('Em Transito', 0)}\n"
         f"• \U0001f4ec Expedindo: {c.get('Expedindo', 0)}\n"
@@ -412,10 +430,10 @@ def fechamento():
         f"• ❌ Cancelado: {c.get('Cancelado', 0)}\n"
         f"• ⏳ Vencidos: {k_mes['pendentes']}\n"
         f"\n"
-        f"\U0001f3e2 *Polos SLA mes*\n"
+        f"\U0001f3e2 *Polos SLA*\n"
         f"{polos_fmt}\n"
         f"\n"
-        f"\U0001f4ca *Por Contratante (mes)*\n"
+        f"\U0001f4ca *Por Contratante*\n"
         f"{grupos_fmt}"
         f"{lojas_section}\n"
         f"━━━━━━━━━━━━━━"
@@ -490,9 +508,9 @@ def raio_x():
     polo_pior = min(polos_v, key=lambda p: polos_v[p]['sla']) if polos_v else ''
     polo_ref  = max(polos_v, key=lambda p: polos_v[p]['sla']) if polos_v else ''
     col_c = 'LojaGrupo' if 'LojaGrupo' in vencidos.columns else 'LojaNome'
-    top_cli = vencidos[col_c].value_counts()
+    top_cli = vencidos[col_c].value_counts() if not vencidos.empty else pd.Series(dtype=int)
     cliente_top = str(top_cli.index[0]).replace('GRUPO ','').replace(' DROGASIL','').title() if len(top_cli) > 0 else ''
-    top3_fmt = '\n'.join(f"  \U0001f534 {str(n).replace('GRUPO ','').replace(' DROGASIL','').title()[:25]}: {c} vencidos" for n, c in top_cli.head(3).items()) if len(top_cli) > 0 else '  Nenhum'
+    top3_fmt = '\n'.join(f"  \U0001f534 {str(n).replace('GRUPO ','').replace(' DROGASIL','').title()[:25]}: {cnt} vencidos" for n, cnt in top_cli.head(3).items()) if len(top_cli) > 0 else '  Nenhum'
     narrativa = gerar_narrativa(k['sla'], k['sem1h'], k['ok'], k['atrasados'], k['pendentes'], n_venc, v_ins, v_trans, v_exp,
                                 polo_pior, polos_v[polo_pior]['sla'] if polo_pior else 0,
                                 polo_ref,  polos_v[polo_ref]['sla']  if polo_ref  else 0,
@@ -536,7 +554,7 @@ def insucesso():
     total_ins = len(ins); total_ped = len(sem1h); pct = total_ins / total_ped * 100 if total_ped else 0
     if total_ins == 0:
         return {"mensagem": f"_Nenhum insucesso no periodo ({data_fmt})_"}
-    tipo_fmt = '\n'.join(f"  • {str(t)[:35]}: {c} ({c/total_ins*100:.0f}%)" for t, c in ins['Status'].value_counts().head(6).items()) if 'Status' in ins.columns else '  _Sem dados_'
+    tipo_fmt = '\n'.join(f"  • {str(t)[:35]}: {cnt} ({cnt/total_ins*100:.0f}%)" for t, cnt in ins['Status'].value_counts().head(6).items()) if 'Status' in ins.columns else '  _Sem dados_'
     polo_lines = []
     if 'Polo' in ins.columns:
         polo_total = sem1h[sem1h['Polo'].str.strip().ne('')].groupby('Polo').size()
@@ -578,36 +596,13 @@ def transportadoras():
     df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=3)
     if df_mes.empty:
         return {"mensagem": f"_Transportadoras indisponivel ({data_fmt} | {hora}) -- API sem resposta_"}
-    TRANS_MAP = {11: 'AGV', 14: 'TPL'}
-    col_id   = 'IDTransportadora' if 'IDTransportadora' in df_mes.columns else None
-    col_nome = 'Transportadora'   if 'Transportadora'   in df_mes.columns else None
     sem1h = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
-    linhas = []
-    total = len(sem1h)
-    if col_id:
-        for tid, g in sem1h.groupby(col_id):
-            nome = TRANS_MAP.get(int(tid) if str(tid).isdigit() else tid,
-                                 str(g[col_nome].iloc[0]) if col_nome else str(tid))
-            ent = g[g['Status_SLA'] != 'Pendente']; ok = int((ent['Status_SLA'] == 'No Prazo').sum())
-            atr = len(ent) - ok; pend = len(g) - len(ent)
-            sla = ok / len(ent) * 100 if len(ent) else 0
-            pct_total = len(g) / total * 100 if total else 0
-            linhas.append(f"{emoji_circle(sla)} *{nome}* (ID {tid}): {len(g)} ped ({pct_total:.0f}%) | SLA {sla:.0f}% | {ok} Ok / {atr} ATR / {pend} PEN")
-    elif col_nome:
-        for nome, g in sem1h.groupby(col_nome):
-            ent = g[g['Status_SLA'] != 'Pendente']; ok = int((ent['Status_SLA'] == 'No Prazo').sum())
-            atr = len(ent) - ok; pend = len(g) - len(ent)
-            sla = ok / len(ent) * 100 if len(ent) else 0
-            pct_total = len(g) / total * 100 if total else 0
-            linhas.append(f"{emoji_circle(sla)} *{nome}*: {len(g)} ped ({pct_total:.0f}%) | SLA {sla:.0f}% | {ok} Ok / {atr} ATR / {pend} PEN")
-    else:
-        return {"mensagem": "_Campo Transportadora nao encontrado na API_"}
-    corpo = '\n'.join(linhas) if linhas else '_Sem dados_'
+    trans_fmt = fmt_transportadora(sem1h)
     msg = (
         f"\U0001f69a *TRANSPORTADORAS -- {data_fmt} | {hora}*\n"
         f"━━━━━━━━━━━━━\n"
-        f"• Total D+ no mes: {total}\n\n"
-        f"{corpo}\n"
+        f"• Total D+ no mes: {len(sem1h)}\n\n"
+        f"{trans_fmt}\n"
         f"━━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
