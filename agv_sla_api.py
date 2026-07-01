@@ -13,6 +13,10 @@ app = FastAPI(title="AGV SLA API")
 API_URL   = "https://api-servicos.octalog.com.br/consulta/pedidos"
 API_TOKEN = os.environ.get("API_TOKEN", "MTEx2tMTQ6QUdWOjIwMjYtMDYtMjE6UGVkaWRvcy1CSQ==")
 TRANS_MAP = {11: 'AGV', 14: 'TPL'}
+CONTRATANTE_NORM = {
+    'droga raia': 'Raia Drogasil',
+    'drogasil':   'Raia Drogasil',
+}
 CIDADES_D2_NORM = {'santos','sao jose dos campos','praia grande','indaiatuba','guaruja','sao vicente','cubatao'}
 FERIADOS        = holidays.Brazil(state='SP', years=range(2025, 2028))
 FERIADOS_EXTRAS = {date(2026, 6, 4)}
@@ -237,6 +241,13 @@ def fmt_transportadora(sem1h: pd.DataFrame) -> str:
         linhas.append(f"{emoji_circle(sla)} *{tnome}*: {len(g)} ped ({pct:.0f}%) | SLA {sla:.0f}% | {ok} Ok / {atr} ATR / {pend} PEN")
     return '\n'.join(linhas) if linhas else '_Sem dados_'
 
+def normalizar_contratante(nome: str) -> str:
+    key = sem_acento(str(nome))
+    for k, v in CONTRATANTE_NORM.items():
+        if sem_acento(k) in key:
+            return v
+    return str(nome).replace('GRUPO ', '').replace(' DROGASIL', '').title()[:30]
+
 def gerar_narrativa(sla, total, ok, atr, pend, vencidos, v_ins, v_trans, v_exp, polo_pior, polo_pior_sla, polo_ref, polo_ref_sla, cliente_top, cliente_top_venc) -> str:
     if sla >= 95: nivel = "dentro da meta"
     elif sla >= 88: nivel = "abaixo da meta -- atencao necessaria"
@@ -319,52 +330,84 @@ def resumo():
 
 @app.get("/painel")
 def painel():
-    hoje  = date.today()
-    mes_s = hoje.replace(day=1).strftime('%Y-%m-%d'); hoje_s = hoje.strftime('%Y-%m-%d')
-    ts = now_brt(); hoje_fmt = hoje.strftime('%d/%m/%Y'); hora = ts.strftime('%H:%M')
+    hoje       = date.today()
+    mes_s      = hoje.replace(day=1).strftime('%Y-%m-%d')
+    hoje_s     = hoje.strftime('%Y-%m-%d')
+    inicio_60d = (hoje - timedelta(days=60)).strftime('%Y-%m-%d')
+    ts         = now_brt(); hoje_fmt = hoje.strftime('%d/%m/%Y'); hora = ts.strftime('%H:%M')
+    mes_label  = hoje.strftime('%m/%Y')
+
+    # --- BLOCO 1: Total do mes ---
     df_mes = fetch_chunked(mes_s, hoje_s, chunk_days=3)
     if df_mes.empty:
         return {"mensagem": f"_Painel indisponivel ({hoje_fmt} | {hora}) -- API sem resposta_"}
-    sem1h = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
-    sem1h['StatusOp']  = _apply_status_map(sem1h['Status'])
-    sem1h['DataSLA_d'] = pd.to_datetime(sem1h['DataSLA_Sistema'], errors='coerce').dt.date
-    abertos  = sem1h[~sem1h['StatusOp'].isin(['Entregue','Cancelado','Devolucao'])].copy()
-    vencidos = abertos[abertos['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
-    n_venc   = len(vencidos)
-    c        = abertos['StatusOp'].value_counts().to_dict()
-    n_ent    = int((sem1h['StatusOp'] == 'Entregue').sum())
-    linhas_cont = []
-    if not vencidos.empty:
-        col = 'LojaGrupo' if 'LojaGrupo' in vencidos.columns else 'LojaNome'
-        for nome, cnt in vencidos[col].value_counts().items():
-            if not nome or str(nome).strip() == '': continue
-            linhas_cont.append(f"  \U0001f534 {str(nome).replace('GRUPO ','').replace(' DROGASIL','').title()[:30]}: {cnt} vencidos")
-    cont_fmt = '\n'.join(linhas_cont) if linhas_cont else '  Nenhum vencido'
-    linhas_polo = []
-    if not vencidos.empty and 'Polo' in vencidos.columns:
-        for polo, cnt in vencidos[vencidos['Polo'].str.strip().ne('')]['Polo'].value_counts().items():
-            linhas_polo.append(f"  \U0001f534 {polo}: {cnt} vencidos")
-    polo_fmt = '\n'.join(linhas_polo) if linhas_polo else '  Nenhum vencido'
-    trans_fmt = fmt_transportadora(sem1h)
+    sem1h_mes = df_mes[~df_mes['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+    sem1h_mes['StatusOp'] = _apply_status_map(sem1h_mes['Status'])
+    k         = kpis(df_mes)
+    n_ins_mes = int((sem1h_mes['StatusOp'] == 'Insucesso').sum())
+    trans_fmt = fmt_transportadora(sem1h_mes)
+    e_mes     = emoji_circle(k['sla'])
+
+    # --- BLOCO 2: Pendencias gerais (60 dias) ---
+    df_60 = fetch_chunked(inicio_60d, hoje_s, chunk_days=7)
+    if df_60.empty:
+        pend_section = "_Dados de pendencias indisponiveis_"
+    else:
+        sem1h_60 = df_60[~df_60['Tipo_SLA'].str.contains('1Hr', na=False)].copy()
+        sem1h_60['StatusOp']  = _apply_status_map(sem1h_60['Status'])
+        sem1h_60['DataSLA_d'] = pd.to_datetime(sem1h_60['DataSLA_Sistema'], errors='coerce').dt.date
+        STATUS_PEND = ['Em Transito', 'Expedindo', 'Problema']
+        pend   = sem1h_60[sem1h_60['StatusOp'].isin(STATUS_PEND)].copy()
+        n_pend = len(pend)
+        n_trans = int((pend['StatusOp'] == 'Em Transito').sum())
+        n_exp   = int((pend['StatusOp'] == 'Expedindo').sum())
+        n_prob  = int((pend['StatusOp'] == 'Problema').sum())
+        venc    = pend[pend['DataSLA_d'].apply(lambda x: pd.notna(x) and x < hoje)]
+        n_venc  = len(venc)
+        # top 5 contratantes normalizados
+        col_c = 'LojaGrupo' if 'LojaGrupo' in venc.columns else 'LojaNome'
+        linhas_cont = []
+        if not venc.empty:
+            venc_c = venc.copy()
+            venc_c['_norm'] = venc_c[col_c].apply(normalizar_contratante)
+            for nm, cnt in venc_c['_norm'].value_counts().head(5).items():
+                if not nm or str(nm).strip() == '': continue
+                linhas_cont.append(f"  \U0001f534 {nm}: {cnt} vencidos")
+        cont_fmt = '\n'.join(linhas_cont) if linhas_cont else '  Nenhum vencido'
+        # top 5 polos
+        linhas_polo = []
+        if not venc.empty and 'Polo' in venc.columns:
+            for polo, cnt in venc[venc['Polo'].str.strip().ne('')]['Polo'].value_counts().head(5).items():
+                linhas_polo.append(f"  \U0001f534 {polo}: {cnt} vencidos")
+        polo_fmt = '\n'.join(linhas_polo) if linhas_polo else '  Nenhum vencido'
+        pend_section = (
+            f"• Total em aberto: {n_pend} pedidos\n"
+            f"• \U0001f69a Em Transito: {n_trans}\n"
+            f"• \U0001f4ec Expedindo: {n_exp}\n"
+            f"• ⚠️ Problema: {n_prob}\n"
+            f"• ⏱️ Com SLA vencido: {n_venc}\n"
+            f"\n"
+            f"\U0001f4cb *Top 5 contratantes (vencidos)*\n"
+            f"{cont_fmt}\n"
+            f"\n"
+            f"\U0001f3e2 *Top 5 polos (vencidos)*\n"
+            f"{polo_fmt}"
+        )
+
     msg = (
         f"⚙️ *PAINEL -- {hoje_fmt} | {hora}*\n"
         f"━━━━━━━━━━━━\n"
-        f"\U0001f4cb *Status em aberto (mes)*\n"
-        f"• ✅ Entregues no mes: {n_ent}\n"
-        f"• \U0001f69a Em Transito: {c.get('Em Transito', 0)}\n"
-        f"• \U0001f4ec Expedindo: {c.get('Expedindo', 0)}\n"
-        f"• \U0001f504 Insucesso: {c.get('Insucesso', 0)}\n"
-        f"• ↩️ Devolucao: {c.get('Devolucao', 0)}\n"
-        f"• ⏳ Vencidos (SLA vencido): {n_venc}\n"
+        f"\U0001f4c5 *TOTAL DO MES ({mes_label})*\n"
+        f"• Total D+: {k['sem1h']} | Entregues: {k['entregues']} | ATR: {k['atrasados']} | Insucesso: {n_ins_mes}\n"
+        f"• SLA: {e_mes} *{k['sla']:.0f}%*\n"
         f"\n"
-        f"\U0001f69a *Por Transportadora (mes)*\n"
+        f"\U0001f69a *Por Transportadora*\n"
         f"{trans_fmt}\n"
         f"\n"
-        f"\U0001f4cb *Por Contratante (vencidos)*\n"
-        f"{cont_fmt}\n"
+        f"━━━━━━━━━━━━\n"
         f"\n"
-        f"\U0001f3e2 *Por Polo (vencidos)*\n"
-        f"{polo_fmt}\n"
+        f"⚠️ *PENDENCIAS (ultimos 60 dias)*\n"
+        f"{pend_section}\n"
         f"━━━━━━━━━━━━"
     )
     return {"mensagem": msg.strip()}
